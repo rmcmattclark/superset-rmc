@@ -1179,6 +1179,8 @@ def flask_app_mutator(app):
         except Exception as e:
             logging.critical(f"SSO init error: {str(e)}")
             return (json.dumps({'error': 'server error'}), 500, {'Content-Type': 'application/json'})
+
+    rmc_sso_init._csrf_exempt = True
     @app.route('/debug-jwt')
     def debug_jwt():
         token = request.args.get('proof')
