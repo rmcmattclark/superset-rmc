@@ -1097,7 +1097,7 @@ def flask_app_mutator(app):
 
             resolved_role_names: list[str] = []
             try:
-                mapping_db_uri = os.getenv('AZURE_ROLE_DB_URI')
+                mapping_db_uri = os.getenv('AZURE_SQL_CONNECTION_STRING')
                 if mapping_db_uri:
                     from sqlalchemy import create_engine, text
                     engine = create_engine(mapping_db_uri, pool_pre_ping=True)
