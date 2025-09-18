@@ -1059,13 +1059,9 @@ def flask_app_mutator(app):
             if not payload_b64 or not sig:
                 return (json.dumps({'error': 'missing payload or sig'}), 400, {'Content-Type': 'application/json'})
 
-            # Get shared secret from environment variable
-            shared = os.getenv('RMC_AUTH_KEY')
-            if not shared:
-                logging.critical("RMC_AUTH_KEY environment variable not set!")
-                return (json.dumps({'error': 'server not configured - missing RMC_AUTH_KEY'}), 500, {'Content-Type': 'application/json'})
-            
-            logging.debug(f"Using RMC_AUTH_KEY from environment: {shared[:10]}...")
+            # Temporarily hardcoded for testing
+            shared = 'n3x2c3d4e5f6789012345678905639125410abcdef1234567890abcdef642156'
+            logging.debug(f"Using hardcoded RMC_AUTH_KEY for testing: {shared[:10]}...")
 
             try:
                 payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
