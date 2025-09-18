@@ -194,7 +194,7 @@ class AzureADTokenValidator:
         self.config = config
         self.redis_client = None
         try:
-            self.redis_client = redis.Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
+            self.redis_client = redis.Redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0'))
             self.redis_client.ping()  # Test connection
             logging.info("Azure AD Token Validator: Redis connection established")
         except Exception as e:
