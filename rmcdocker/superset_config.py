@@ -585,7 +585,7 @@ class UnifiedSecurityManager(SupersetSecurityManager):
             azure_groups = user_info.get('groups', [])
             if not isinstance(azure_groups, list):
                 azure_groups = []
-            mapping_db_uri = os.getenv('AZURE_ROLE_DB_URI')
+            mapping_db_uri = os.getenv('AZURE_SQL_CONNECTION_STRING')
             mapping_table = os.getenv('AZURE_ROLE_MAPPING_TABLE', 'dbo.ActiveEntraGroups')
             mapping_group_col = os.getenv('AZURE_ROLE_MAPPING_GROUP_COL', 'GroupId')
             mapping_role_col = os.getenv('AZURE_ROLE_MAPPING_ROLE_COL', 'DisplayName')
@@ -931,11 +931,126 @@ EXTRA_SEQUENTIAL_COLOR_SCHEMES = [
 }]
  
 def flask_app_mutator(app):
-    from flask_wtf.csrf import CSRFProtect
+    try:
+        security_manager = app.appbuilder.sm
+        roles_to_create = ["myportaluser"]  # Only create default role - Azure groups handle the rest
+       
+        for role_name in roles_to_create:
+            if not security_manager.find_role(role_name):
+                logging.info(f"Creating missing role: {role_name}")
+                security_manager.add_role(role_name)
+            else:
+                logging.info(f"Role already exists: {role_name}")
+               
+        logging.info("Finished checking/creating roles")
+    except Exception as e:
+        logging.exception(f"Error creating roles: {e}")
+       
+    @app.before_request
+    def process_jwt_for_every_request():
+        path = request.path
+        logging.critical(f"BEFORE_REQUEST FIRED: {path}")
+       
+        if path.startswith('/static/') or path.startswith('/healthz'):
+            return None
+        token = request.args.get('proof')
+        if not token and 'Proof' in request.headers:
+            token = request.headers.get('Proof')
+        if not token and 'Authorization' in request.headers:
+            auth_header = request.headers.get('Authorization', '')
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+       
+        if token:
+            logging.critical(f"TOKEN FOUND IN REQUEST: {path}")
+           
+            try:
+                decoded = azure_token_validator.validate_token(token)
+                username = decoded.get(JWT_IDENTITY_CLAIM)  # Use 'upn' not 'username'
+               
+                if username:
+                    logging.critical(f"TOKEN USERNAME: {username}")
+                   
+                    try:
+                        from flask_appbuilder.security.sqla.models import User
+                        db = app.appbuilder.get_session
+                        existing_user = db.query(User).filter_by(username=username).first()
+                       
+                        if existing_user:
+                            logging.critical(f"USER EXISTS IN DB: {username}")
+                        else:
+                            logging.critical(f"USER DOES NOT EXIST IN DB, CREATING: {username}")
+                    except ImportError as e:
+                        logging.critical(f"Import error: {str(e)}")
+                        existing_user = app.appbuilder.sm.find_user(username=username)
+                        if existing_user:
+                            logging.critical(f"USER EXISTS (via SM): {username}")
+                        else:
+                            logging.critical(f"USER DOES NOT EXIST (via SM): {username}")
+                       
+                        user_name = decoded.get('user_name', '')
+                        email = decoded.get('email', username)
+                        roles = decoded.get('roles', [])
+                        name_parts = user_name.split(' ', 1)
+                        first_name = name_parts[0] if len(name_parts) > 0 else ''
+                        last_name = name_parts[1] if len(name_parts) > 1 else ''
+                       
+                        try:
+                            sm = app.appbuilder.sm
+                            role_objects = []
+                            for role_name in roles:
+                                role = sm.find_role(role_name)
+                                if not role:
+                                    role = sm.add_role(role_name)
+                                    logging.critical(f"Created role: {role_name}")
+                                role_objects.append(role)
+                           
+                            public_role = sm.find_role('myportaluser')
+                            if public_role and public_role not in role_objects:
+                                role_objects.append(public_role)
+ 
+                            # Find or create the user
+                            user = sm.find_user(username=username)
+                            if not user:
+                                user = sm.add_user(
+                                    username=username,
+                                    first_name=first_name,
+                                    last_name=last_name,
+                                    email=email,
+                                    role=role_objects[0] if role_objects else None # First role is primary
+                                )
+ 
+                                logging.critical(f"Created user: {username}")
+                                # Add additional roles
+                                for role in role_objects[1:]:
+                                    sm.add_user_role(new_user, role)
+                            else:
+                                logging.critical(f"User already exists: {username}")
+                                # Update user roles. Important for role changes in the JWT.
+                                user.roles = role_objects
+                                logging.critical(f"Updated roles for user: {username} with {len(role_objects)} roles")
+ 
+                           # *** CRITICAL: Set the user in the Flask login context ***
+                            sm.set_flask_login_user(new_user)
+                            logging.critical(f"Auto-logged in new user: {username}")
+                           
+                        except Exception as user_create_error:
+                            logging.critical(f"Error creating user: {str(user_create_error)}")
+                            logging.critical(traceback.format_exc())
+                   
+                    if not g.get('user') or not g.get('user').is_authenticated:
+                        try:
+                            user = app.appbuilder.sm.auth_user_jwt(token)
+                            if user:
+                                logging.critical(f"USER AUTHENTICATED: {user.username}")
+                        except Exception as auth_error:
+                            logging.critical(f"AUTH ERROR: {str(auth_error)}")
+               
+            except Exception as e:
+                logging.critical(f"JWT PROCESSING ERROR: {str(e)}")
+                logging.critical(traceback.format_exc())
 
-    sso_bp = Blueprint('sso', __name__)
-
-    @sso_bp.route('/api/rmc/sso/init', methods=['POST'])
+    @app.route('/api/rmc/sso/init', methods=['POST'])
     def rmc_sso_init():
         try:
             data = request.get_json(silent=True) or {}
@@ -950,17 +1065,16 @@ def flask_app_mutator(app):
             if not shared:
                 return (json.dumps({'error': 'server not configured'}), 500, {'Content-Type': 'application/json'})
 
-            try:
-                payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
-            except Exception as e:
-                logging.critical(f"Payload decode error before signature check: {str(e)}")
-                return (json.dumps({'error': 'bad payload encoding'}), 400, {'Content-Type': 'application/json'})
-
-            computed = hmac.new(shared.encode('utf-8'), payload_json.encode('utf-8'), hashlib.sha256).hexdigest()
+            computed = hmac.new(shared.encode('utf-8'), payload_b64.encode('utf-8'), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(computed, sig):
                 return (json.dumps({'error': 'invalid signature'}), 401, {'Content-Type': 'application/json'})
 
-            pointer = json.loads(payload_json)
+            try:
+                payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
+                pointer = json.loads(payload_json)
+            except Exception as e:
+                logging.critical(f"Pointer decode error: {str(e)}")
+                return (json.dumps({'error': 'bad payload'}), 400, {'Content-Type': 'application/json'})
 
             upn = pointer.get('upn') or pointer.get('email')
             name = pointer.get('name') or upn
@@ -1065,12 +1179,151 @@ def flask_app_mutator(app):
             logging.critical(f"SSO init error: {str(e)}")
             return (json.dumps({'error': 'server error'}), 500, {'Content-Type': 'application/json'})
 
-    app.register_blueprint(sso_bp)
+    rmc_sso_init._csrf_exempt = True
+    @app.route('/debug-jwt')
+    def debug_jwt():
+        token = request.args.get('proof')
+        result = {"received_token": False}
+        if token:
+            result["received_token"] = True
+            result["token_length"] = len(token)
+            try:
+                decoded = azure_token_validator.validate_token(token)
+                result["payload"] = decoded
+                current_timestamp = datetime.datetime.now().timestamp()
+                if 'exp' in decoded:
+                    exp_timestamp = decoded['exp']
+                    result["token_expiration"] = {
+                        "expires_at": exp_timestamp,
+                        "current_time": current_timestamp,
+                        "seconds_until_expiry": exp_timestamp - current_timestamp,
+                        "is_expired": exp_timestamp <= current_timestamp
+                    }
+                configured_claim_present = JWT_IDENTITY_CLAIM in decoded
+                result["token_identity"] = {
+                    "has_username": "username" in decoded,
+                    "has_sub": "sub" in decoded,
+                    "configured_identity_claim": JWT_IDENTITY_CLAIM,
+                    "configured_claim_present": configured_claim_present,
+                    "identity_value": decoded.get(JWT_IDENTITY_CLAIM)
+                }
+                if not configured_claim_present:
+                    result["identity_warning"] = f"The configured identity claim '{JWT_IDENTITY_CLAIM}' is missing from token!"
+                    alternative_claims = []
+                    if "username" in decoded and JWT_IDENTITY_CLAIM != "username":
+                        alternative_claims.append("username")
+                    if "sub" in decoded and JWT_IDENTITY_CLAIM != "sub":
+                        alternative_claims.append("sub")
+                    if alternative_claims:
+                        result["identity_suggestion"] = f"Consider changing JWT_IDENTITY_CLAIM to one of these available claims: {alternative_claims}"
+                logging.info(f"Successfully decoded token with payload: {json.dumps(decoded)}")
+            except Exception as e:
+                result["decode_error"] = str(e)
+                logging.error(f"Error decoding token: {str(e)}")
+        return json.dumps(result, indent=2)
+ 
+    @app.route('/jwt-debug-status')
+    def jwt_debug_status():
+        result = {
+            "before_request_registered": True,
+            "app_name": app.name,
+            "auth_type": app.config.get('AUTH_TYPE'),
+            "jwt_settings": {
+                "token_location": app.config.get('JWT_TOKEN_LOCATION'),
+                "query_string_name": app.config.get('JWT_QUERY_STRING_NAME'),
+                "identity_claim": app.config.get('JWT_IDENTITY_CLAIM')
+            },
+            "custom_sm_active": isinstance(app.appbuilder.sm, CustomSecurityManager),
+            "username_key": app.appbuilder.sm.auth_user_jwt_username_key if hasattr(app.appbuilder.sm, 'auth_user_jwt_username_key') else None,
+        }
+       
+        test_token = request.args.get('proof')
+        if test_token:
+            try:
+                decoded = azure_token_validator.validate_token(test_token)
+                result["token_test"] = {
+                    "decoded": True,
+                    "username": decoded.get('username'),
+                    "roles": decoded.get('roles')
+                }
+               
+                try:
+                    auth_result = app.appbuilder.sm.auth_user_jwt(test_token)
+                    result["auth_test"] = {
+                        "success": auth_result is not None,
+                        "username": auth_result.username if auth_result else None
+                    }
+                except Exception as auth_e:
+                    result["auth_test"] = {
+                        "success": False,
+                        "error": str(auth_e)
+                    }
+            except Exception as e:
+                result["token_test"] = {
+                    "decoded": False,
+                    "error": str(e)
+                }
+       
+        return json.dumps(result, indent=2)
+ 
+    @app.route('/check-roles')
+    def check_roles():
+        if not g.user or not g.user.is_authenticated:
+            return json.dumps({"error": "Not authenticated", "status": "Please login with JWT token"})
+       
+        try:
+            roles = [r.name for r in g.user.roles]
+            permissions = list(g.user.permissions)
+           
+            return json.dumps({
+                "username": g.user.username,
+                "full_name": f"{g.user.first_name} {g.user.last_name}",
+                "email": g.user.email,
+                "roles": roles,
+                "is_admin": g.user.is_admin(),
+                "permissions": permissions
+            }, indent=2)
+        except Exception as e:
+            return json.dumps({
+                "error": "Error getting user details",
+                "message": str(e),
+                "traceback": traceback.format_exc()
+            }, indent=2)
 
-    if 'csrf' in app.extensions:
-        csrf = app.extensions['csrf']
-        csrf.exempt(sso_bp)
-
+    @app.route('/test-template-functions')
+    def test_template_functions():
+        from superset import jinja_context
+        import inspect
+        import json
+        
+        result = {
+            "available_functions": [],
+            "test_results": {}
+        }
+        
+        for name, func in inspect.getmembers(jinja_context, inspect.isfunction):
+            result["available_functions"].append(name)
+        
+        if hasattr(jinja_context, 'current_username'):
+            try:
+                result["test_results"]["current_username"] = jinja_context.current_username()
+            except Exception as e:
+                result["test_results"]["current_username_error"] = str(e)
+        else:
+            result["test_results"]["current_username_error"] = "Function not found in jinja_context"
+            
+        if hasattr(jinja_context, 'current_user_id'):
+            try:
+                result["test_results"]["current_user_id"] = jinja_context.current_user_id()
+            except Exception as e:
+                result["test_results"]["current_user_id_error"] = str(e)
+        else:
+            result["test_results"]["current_user_id_error"] = "Function not found in jinja_context"
+        
+        result["jinja_context_addons"] = {k: str(v) for k, v in app.config.get('JINJA_CONTEXT_ADDONS', {}).items()}
+        
+        return json.dumps(result, indent=2)
+ 
     return app
  
 FLASK_APP_MUTATOR = flask_app_mutator
