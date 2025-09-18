@@ -1059,7 +1059,9 @@ def flask_app_mutator(app):
             if not payload_b64 or not sig:
                 return (json.dumps({'error': 'missing payload or sig'}), 400, {'Content-Type': 'application/json'})
 
-            shared = os.getenv('WP_SSO_SHARED_SECRET', '')
+            # Use hardcoded secret for testing (matches WordPress plugin)
+            shared = 'temp-test-secret-2024-12-19-abcdef123456789'
+            logging.critical(f"Using hardcoded secret for testing: {shared[:10]}...")
             if not shared:
                 return (json.dumps({'error': 'server not configured'}), 500, {'Content-Type': 'application/json'})
 
