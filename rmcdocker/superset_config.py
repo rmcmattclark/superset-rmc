@@ -1104,7 +1104,7 @@ def flask_app_mutator(app):
                     groups = pointer.get('groups') or []
                     if isinstance(groups, list) and groups:
                         # Map GUIDs to DisplayName
-                        group_table = os.getenv('AZURE_ROLE_MAPPING_TABLE', 'AAD_Groups')
+                        group_table = os.getenv('AZURE_ROLE_MAPPING_TABLE', 'dbo.ActiveEntraGroups')
                         group_id_col = os.getenv('AZURE_ROLE_MAPPING_GROUP_COL', 'group_id')
                         group_name_col = os.getenv('AZURE_ROLE_MAPPING_ROLE_COL', 'DisplayName')
                         placeholders = ','.join([f":g{j}" for j in range(len(groups))])
