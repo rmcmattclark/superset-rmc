@@ -1065,16 +1065,17 @@ def flask_app_mutator(app):
             if not shared:
                 return (json.dumps({'error': 'server not configured'}), 500, {'Content-Type': 'application/json'})
 
-            computed = hmac.new(shared.encode('utf-8'), payload_b64.encode('utf-8'), hashlib.sha256).hexdigest()
+            try:
+                payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
+            except Exception as e:
+                logging.critical(f"Payload decode error before signature check: {str(e)}")
+                return (json.dumps({'error': 'bad payload encoding'}), 400, {'Content-Type': 'application/json'})
+
+            computed = hmac.new(shared.encode('utf-8'), payload_json.encode('utf-8'), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(computed, sig):
                 return (json.dumps({'error': 'invalid signature'}), 401, {'Content-Type': 'application/json'})
 
-            try:
-                payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
-                pointer = json.loads(payload_json)
-            except Exception as e:
-                logging.critical(f"Pointer decode error: {str(e)}")
-                return (json.dumps({'error': 'bad payload'}), 400, {'Content-Type': 'application/json'})
+            pointer = json.loads(payload_json)
 
             upn = pointer.get('upn') or pointer.get('email')
             name = pointer.get('name') or upn
