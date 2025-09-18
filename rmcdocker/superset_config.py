@@ -136,7 +136,7 @@ AUTH_ROLE_PUBLIC = 'myportaluser'  # Use myportaluser as public role instead of 
 # Production security settings
 ENABLE_PROXY_FIX = True  # Handle reverse proxy headers
 WTF_CSRF_ENABLED = True  # CSRF protection
-WTF_CSRF_EXEMPT_LIST = ['/api/rmc/sso/init']
+WTF_CSRF_EXEMPT_LIST = ['rmc_sso_init']
 # Session configuration consolidated with CORS settings below
 
 # Azure OAuth Configuration - COMMENTED OUT (JWT-only mode)
