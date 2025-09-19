@@ -6,7 +6,6 @@ import json
 import traceback
 from flask import request, redirect, url_for, g, Blueprint
 from superset.security import SupersetSecurityManager
-# Removed Flask-JWT-Extended - using Azure AD token validation instead
 import hmac
 import hashlib
 import base64
@@ -119,14 +118,9 @@ else:
     print(f"Value NOT FOUND or EMPTY for os.getenv('MAPBOX_API_KEY')")
 
  
-# Unified OAuth + JWT Configuration
 from flask_appbuilder.security.manager import AUTH_OAUTH
-
-# PRIMARY AUTHENTICATION: JWT Only (WordPress iframe)
-# OAuth disabled - WordPress sends JWT tokens directly
-# AUTH_TYPE = AUTH_OAUTH  # COMMENTED OUT - OAuth direct access disabled
 from flask_appbuilder.security.manager import AUTH_DB
-AUTH_TYPE = AUTH_DB  # Use DB auth with custom Microsoft OAuth and WordPress JWT support
+AUTH_TYPE = AUTH_DB 
 AUTH_USER_REGISTRATION = True
 AUTH_USER_REGISTRATION_ROLE = "myportaluser"
 
@@ -136,11 +130,6 @@ AUTH_ROLE_PUBLIC = 'myportaluser'  # Use myportaluser as public role instead of 
 # Production security settings
 ENABLE_PROXY_FIX = True  # Handle reverse proxy headers
 WTF_CSRF_ENABLED = False  # CSRF protection
-# Session configuration consolidated with CORS settings below
-
-# Custom Microsoft OAuth Configuration (no Flask-AppBuilder conflicts)
-# Flask-AppBuilder OAUTH_PROVIDERS disabled - using custom implementation
-# OAUTH_PROVIDERS = []  # Disabled - using custom Microsoft OAuth routes
 
 # Azure AD Configuration for OBO Token Validation
 AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")
@@ -358,9 +347,7 @@ class UnifiedSecurityManager(SupersetSecurityManager):
        
         logging.critical(f"Using '{self.auth_user_jwt_username_key}' as the JWT username key")
  
-    # Flask-AppBuilder OAuth methods removed - using custom Microsoft OAuth implementation
-    # Custom OAuth routes handle authentication directly without Flask-AppBuilder conflicts
-    
+
     def _get_user_groups_from_graph(self, access_token):
         """
         Get user groups from Microsoft Graph API - used by JWT when OBO token lacks groups
@@ -676,23 +663,17 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         return None
     
     def unauthorized(self):
-        """
-        CRITICAL: Redirect unauthorized users to custom Microsoft OAuth
-        Bypasses Flask-AppBuilder OAuth and uses our clean custom implementation
-        """
         from flask import redirect, url_for
         
         logging.critical("========== UNAUTHORIZED ACCESS - REDIRECTING TO CUSTOM MICROSOFT OAUTH ==========")
-        logging.critical("🚨 UNAUTHORIZED METHOD CALLED - USING CUSTOM OAUTH ROUTE 🚨")
+        logging.critical("UNAUTHORIZED METHOD CALLED - USING CUSTOM OAUTH ROUTE")
         
         try:
-            # Use our custom Microsoft OAuth route (no Flask-AppBuilder conflicts)
             custom_oauth_url = url_for('microsoft_auth')
             logging.critical(f"[CUSTOM OAUTH] Redirecting to: {custom_oauth_url}")
             return redirect(custom_oauth_url)
         except Exception as e:
             logging.critical(f"Custom OAuth redirect failed: {str(e)}")
-            # Direct fallback to our custom route path
             fallback_url = "/auth/microsoft"
             logging.critical(f"[FALLBACK] Using direct path: {fallback_url}")
             return redirect(fallback_url)
@@ -703,7 +684,6 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         """
         logging.critical("========== LOGIN_URL CALLED - REDIRECTING TO MICROSOFT ==========")
         
-        # Build Microsoft login URL manually (consistent with unauthorized method)
         tenant_id = AZURE_TENANT_ID
         client_id = AZURE_CLIENT_ID
         
@@ -722,8 +702,6 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         logging.critical(f"[LOGIN URL] Returning Microsoft URL: {microsoft_login_url}")
         return microsoft_login_url
 
-    # Removed auth_type property - no longer needed since we always redirect to Microsoft
- 
  
 CUSTOM_SECURITY_MANAGER = UnifiedSecurityManager
  
@@ -836,9 +814,6 @@ JINJA_CONTEXT_ADDONS = {
 # This new flag sets the horizontal layout as the default for all NEW dashboards
 DASHBOARD_HORIZONTAL_FILTER_BAR_DEFAULT = True
  
-# Unified SSO Session Configuration
-# Session configuration moved to CORS section for consolidation
-
 # MyPortal Configuration
 TALISMAN_CONFIG = {
     'content_security_policy': {
@@ -1036,9 +1011,13 @@ def flask_app_mutator(app):
             if not payload_b64 or not sig:
                 return (json.dumps({'error': 'missing payload or sig'}), 400, {'Content-Type': 'application/json'})
 
-            # Temporarily hardcoded for testing
-            shared = 'n3x2c3d4e5f6789012345678905639125410abcdef1234567890abcdef642156'
-            logging.debug(f"Using hardcoded RMC_AUTH_KEY for testing: {shared[:10]}...")
+            # Get shared secret from environment variable (must match WordPress wp-config.php)
+            shared = os.getenv('RMC_AUTH_KEY')
+            if not shared:
+                logging.critical("CRITICAL ERROR: RMC_AUTH_KEY not found in environment variables!")
+                return (json.dumps({'error': 'server configuration error'}), 500, {'Content-Type': 'application/json'})
+            
+            logging.debug(f"Using RMC_AUTH_KEY from environment: {shared[:10]}...")
 
             try:
                 payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
