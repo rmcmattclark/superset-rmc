@@ -1300,39 +1300,34 @@ def flask_app_mutator(app):
         
         return json.dumps(result, indent=2)
 
-    # Custom Microsoft OAuth Routes (no Flask-AppBuilder conflicts)
-    @app.route('/')
-    def root_redirect():
+    # Global request interceptor - handles ALL requests before route processing
+    @app.before_request
+    def intercept_authentication_requests():
         """
-        Intercept root URL and redirect to Microsoft authentication
-        This ensures direct access always goes to Microsoft login
+        Intercept root and login URLs and redirect to Microsoft authentication
+        This runs BEFORE any route handler, ensuring it always executes
         """
-        from flask import redirect, url_for
+        from flask import request, redirect, url_for
         from flask_login import current_user
         
-        logging.critical("========== ROOT URL ACCESS - CHECKING AUTHENTICATION ==========")
+        # Get the request path
+        path = request.path
         
-        # If user is already authenticated, let them continue to Superset
-        if current_user and current_user.is_authenticated:
-            logging.critical(f"User already authenticated: {current_user}")
-            # Let Superset handle the authenticated user normally
-            return app.view_functions['Superset.index']()
+        # Only intercept root and login paths for unauthenticated users
+        if path in ['/', '/login', '/login/']:
+            logging.critical(f"========== INTERCEPTED REQUEST: {path} ==========")
+            
+            # If user is already authenticated, let them continue
+            if current_user and current_user.is_authenticated:
+                logging.critical(f"User already authenticated: {current_user} - allowing access")
+                return None  # Continue with normal request processing
+            
+            # User not authenticated - redirect to Microsoft OAuth
+            logging.critical("User not authenticated - redirecting to Microsoft OAuth")
+            return redirect(url_for('microsoft_auth'))
         
-        # User not authenticated - redirect to Microsoft OAuth
-        logging.critical("User not authenticated - redirecting to Microsoft OAuth")
-        return redirect(url_for('microsoft_auth'))
-    
-    @app.route('/login/')
-    @app.route('/login')
-    def login_redirect():
-        """
-        Intercept login URLs and redirect to Microsoft authentication
-        Ensures any login attempt goes through Microsoft OAuth
-        """
-        from flask import redirect, url_for
-        
-        logging.critical("========== LOGIN URL ACCESS - REDIRECTING TO MICROSOFT ==========")
-        return redirect(url_for('microsoft_auth'))
+        # For all other requests, continue normal processing
+        return None
     
     @app.route('/auth/microsoft')
     def microsoft_auth():
