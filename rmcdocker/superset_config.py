@@ -139,20 +139,21 @@ WTF_CSRF_ENABLED = False  # CSRF protection
 # Session configuration consolidated with CORS settings below
 
 # Azure OAuth Configuration - ENABLED for direct access
+# Use the same tenant/client IDs as JWT validation for consistency
 OAUTH_PROVIDERS = [
     {
         'name': 'azure',
         'token_key': 'access_token',
         'icon': 'fa-microsoft',
         'remote_app': {
-            'client_id': os.getenv('AZURE_CLIENT_ID', 'c83f7fde-b623-4854-898c-15148304ef54'),
+            'client_id': os.getenv('AZURE_CLIENT_ID', '39ad4e02-9a76-4464-810b-eac74dbc0950'),
             'client_secret': os.getenv('AZURE_CLIENT_SECRET', 'y1p8Q~fG~hGudO7N6s56Wj~82j0c56P5wfsnJb2a'),
             'api_base_url': 'https://graph.microsoft.com/v1.0/',
             'client_kwargs': {
                 'scope': 'openid email profile User.Read Group.Read.All'
             },
-            'access_token_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID", "62255d93-c3a2-4017-8a83-99885d2c4b39")}/oauth2/v2.0/token',
-            'authorize_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID", "62255d93-c3a2-4017-8a83-99885d2c4b39")}/oauth2/v2.0/authorize',
+            'access_token_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")}/oauth2/v2.0/token',
+            'authorize_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")}/oauth2/v2.0/authorize',
         }
     }
 ]
@@ -784,30 +785,34 @@ class UnifiedSecurityManager(SupersetSecurityManager):
     
     def unauthorized(self):
         """
-        CRITICAL: NEVER show login page - ALWAYS redirect to Microsoft authentication
-        This ensures WordPress iframe users and direct browser users both go to Microsoft
+        CRITICAL: Redirect unauthorized users directly to Azure OAuth
+        This bypasses the login page and goes straight to Microsoft authentication
         """
-        from flask import redirect
+        from flask import redirect, url_for
         
-        logging.critical("========== UNAUTHORIZED ACCESS - REDIRECTING TO MICROSOFT ==========")
-        logging.critical("🚨 UNAUTHORIZED METHOD CALLED - OUR SECURITY MANAGER IS WORKING! 🚨")
+        logging.critical("========== UNAUTHORIZED ACCESS - REDIRECTING TO AZURE OAUTH ==========")
+        logging.critical("🚨 UNAUTHORIZED METHOD CALLED - REDIRECTING TO AZURE LOGIN 🚨")
         
-        # Build Microsoft login URL manually (no dependency on OAuth configuration)
-        tenant_id = AZURE_TENANT_ID
-        client_id = AZURE_CLIENT_ID
-        
-        # Microsoft OAuth URL for direct authentication
-        microsoft_login_url = (
-            f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
-            f"?client_id={client_id}"
-            f"&response_type=code"
-            f"&redirect_uri=https://stg-dashboards.rmcare.com/"
-            f"&scope=openid%20email%20profile%20User.Read"
-            f"&response_mode=query"
-        )
-        
-        logging.critical(f"[FORCE REDIRECT] Sending user to Microsoft: {microsoft_login_url}")
-        return redirect(microsoft_login_url)
+        try:
+            # Use Flask-AppBuilder's OAuth system for proper redirect
+            oauth_login_url = url_for('AuthOAuthView.login', provider='azure')
+            logging.critical(f"[OAUTH REDIRECT] Sending user to: {oauth_login_url}")
+            return redirect(oauth_login_url)
+        except Exception as e:
+            logging.critical(f"OAuth redirect failed: {str(e)}")
+            # Fallback to manual Microsoft URL if OAuth system fails
+            tenant_id = AZURE_TENANT_ID
+            client_id = AZURE_CLIENT_ID
+            fallback_url = (
+                f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
+                f"?client_id={client_id}"
+                f"&response_type=code"
+                f"&redirect_uri=https://stg-dashboards.rmcare.com/oauth-authorized/azure"
+                f"&scope=openid%20email%20profile%20User.Read%20Group.Read.All"
+                f"&response_mode=query"
+            )
+            logging.critical(f"[FALLBACK REDIRECT] Using manual URL: {fallback_url}")
+            return redirect(fallback_url)
 
     def login_url(self, next_url=None):
         """
