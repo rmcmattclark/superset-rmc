@@ -126,7 +126,7 @@ from flask_appbuilder.security.manager import AUTH_OAUTH
 # OAuth disabled - WordPress sends JWT tokens directly
 # AUTH_TYPE = AUTH_OAUTH  # COMMENTED OUT - OAuth direct access disabled
 from flask_appbuilder.security.manager import AUTH_DB
-AUTH_TYPE = AUTH_DB  # Use DB auth but override unauthorized() to redirect to Microsoft
+AUTH_TYPE = AUTH_OAUTH  # Use OAuth for direct access, JWT still supported for WordPress
 AUTH_USER_REGISTRATION = True
 AUTH_USER_REGISTRATION_ROLE = "myportaluser"
 
@@ -138,24 +138,24 @@ ENABLE_PROXY_FIX = True  # Handle reverse proxy headers
 WTF_CSRF_ENABLED = False  # CSRF protection
 # Session configuration consolidated with CORS settings below
 
-# Azure OAuth Configuration - COMMENTED OUT (JWT-only mode)
-# OAUTH_PROVIDERS = [
-#     {
-#         'name': 'azure',
-#         'token_key': 'access_token',
-#         'icon': 'fa-microsoft',
-#         'remote_app': {
-#             'client_id': os.getenv('AZURE_CLIENT_ID'),
-#             'client_secret': os.getenv('AZURE_CLIENT_SECRET'),
-#             'api_base_url': 'https://graph.microsoft.com/v1.0/',
-#             'client_kwargs': {
-#                 'scope': 'openid email profile User.Read Group.Read.All'
-#             },
-#             'access_token_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID")}/oauth2/v2.0/token',
-#             'authorize_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID")}/oauth2/v2.0/authorize',
-#         }
-#     }
-# ]
+# Azure OAuth Configuration - ENABLED for direct access
+OAUTH_PROVIDERS = [
+    {
+        'name': 'azure',
+        'token_key': 'access_token',
+        'icon': 'fa-microsoft',
+        'remote_app': {
+            'client_id': os.getenv('AZURE_CLIENT_ID', 'c83f7fde-b623-4854-898c-15148304ef54'),
+            'client_secret': os.getenv('AZURE_CLIENT_SECRET', 'y1p8Q~fG~hGudO7N6s56Wj~82j0c56P5wfsnJb2a'),
+            'api_base_url': 'https://graph.microsoft.com/v1.0/',
+            'client_kwargs': {
+                'scope': 'openid email profile User.Read Group.Read.All'
+            },
+            'access_token_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID", "62255d93-c3a2-4017-8a83-99885d2c4b39")}/oauth2/v2.0/token',
+            'authorize_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID", "62255d93-c3a2-4017-8a83-99885d2c4b39")}/oauth2/v2.0/authorize',
+        }
+    }
+]
 
 # Azure AD Configuration for OBO Token Validation
 AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")
@@ -373,11 +373,100 @@ class UnifiedSecurityManager(SupersetSecurityManager):
        
         logging.critical(f"Using '{self.auth_user_jwt_username_key}' as the JWT username key")
  
-    # OAuth authentication DISABLED - JWT-only mode
-    # def auth_user_oauth(self, userinfo):
-    #     """OAuth authentication disabled - using JWT-only mode"""
-    #     logging.critical("========== AUTH_USER_OAUTH DISABLED ==========")
-    #     return None
+    def auth_user_oauth(self, userinfo):
+        """
+        OAuth authentication for direct Superset access via Azure AD
+        Uses the same unified user creation and Azure SQL group mapping as JWT authentication
+        """
+        logging.critical("========== AUTH_USER_OAUTH METHOD CALLED ==========")
+        logging.critical(f"OAuth userinfo: {userinfo}")
+        
+        try:
+            # Extract email/username from OAuth userinfo
+            user_id = userinfo.get('preferred_username') or userinfo.get('email') or userinfo.get('upn')
+            if not user_id:
+                logging.critical("ERROR: No user identifier found in OAuth userinfo")
+                return None
+                
+            # Get groups from OAuth token (should be populated by oauth_user_info method)
+            azure_groups = userinfo.get('groups', [])
+            logging.critical(f"OAuth user {user_id} has {len(azure_groups)} groups: {azure_groups}")
+            
+            # Prepare user_info in same format as JWT authentication
+            user_info = {
+                'email': user_id,
+                'name': userinfo.get('name', user_id),
+                'given_name': userinfo.get('given_name', ''),
+                'family_name': userinfo.get('family_name', ''),
+                'azure_groups': azure_groups
+            }
+            
+            # Use the same unified user creation logic as JWT authentication
+            user = self._create_or_update_user(user_id, user_info, 'oauth')
+            
+            if user:
+                logging.critical(f"OAuth authentication successful for {user_id}")
+                # Store authentication method in session for continuity
+                from flask import session
+                session['auth_method'] = 'oauth'
+                session['azure_user_email'] = user_id
+                return user
+            else:
+                logging.critical(f"Failed to create/update user for {user_id}")
+                return None
+                
+        except Exception as e:
+            logging.critical(f"OAuth authentication error: {str(e)}")
+            logging.critical(f"OAuth error traceback: {traceback.format_exc()}")
+            return None
+    
+    def oauth_user_info(self, provider, resp):
+        """
+        Called by Flask-AppBuilder to fetch user info from OAuth provider
+        Enriches userinfo with group membership from Microsoft Graph API
+        """
+        logging.critical("========== OAUTH_USER_INFO METHOD CALLED ==========")
+        
+        if provider == 'azure':
+            try:
+                # Get basic user info from Graph API
+                access_token = resp['access_token']
+                headers = {'Authorization': f'Bearer {access_token}'}
+                
+                # Get user profile
+                user_response = requests.get('https://graph.microsoft.com/v1.0/me', headers=headers, timeout=10)
+                if user_response.status_code != 200:
+                    logging.critical(f"Failed to get user info: {user_response.status_code}")
+                    return {}
+                    
+                user_data = user_response.json()
+                logging.critical(f"Graph API user data: {user_data}")
+                
+                # Get group membership (same logic as JWT authentication)
+                groups_response = requests.get('https://graph.microsoft.com/v1.0/me/memberOf', headers=headers, timeout=10)
+                group_ids = []
+                if groups_response.status_code == 200:
+                    groups_data = groups_response.json()
+                    group_ids = [group['id'] for group in groups_data.get('value', [])]
+                    logging.critical(f"Retrieved {len(group_ids)} groups from Graph API: {group_ids}")
+                else:
+                    logging.critical(f"Failed to get groups: {groups_response.status_code}")
+                
+                # Return userinfo in expected format
+                return {
+                    'preferred_username': user_data.get('userPrincipalName'),
+                    'email': user_data.get('mail') or user_data.get('userPrincipalName'),
+                    'name': user_data.get('displayName', ''),
+                    'given_name': user_data.get('givenName', ''),
+                    'family_name': user_data.get('surname', ''),
+                    'groups': group_ids
+                }
+                
+            except Exception as e:
+                logging.critical(f"oauth_user_info error: {str(e)}")
+                return {}
+        
+        return {}
     
     def _get_user_groups_from_graph(self, access_token):
         """
