@@ -1308,7 +1308,7 @@ def flask_app_mutator(app):
         Redirects directly to Microsoft authentication with proper callback URL
         """
         import secrets
-        from flask import session
+        from flask import session, redirect
         
         logging.critical("========== CUSTOM MICROSOFT OAUTH INITIATED ==========")
         
@@ -1345,6 +1345,10 @@ def flask_app_mutator(app):
         Custom Microsoft OAuth callback - handles the response from Microsoft
         Uses same unified user creation logic as WordPress JWT authentication
         """
+        from flask import session, redirect, request
+        import requests
+        import traceback
+        
         logging.critical("========== CUSTOM MICROSOFT OAUTH CALLBACK ==========")
         
         try:
