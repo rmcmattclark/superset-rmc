@@ -126,7 +126,7 @@ from flask_appbuilder.security.manager import AUTH_OAUTH
 # OAuth disabled - WordPress sends JWT tokens directly
 # AUTH_TYPE = AUTH_OAUTH  # COMMENTED OUT - OAuth direct access disabled
 from flask_appbuilder.security.manager import AUTH_DB
-AUTH_TYPE = AUTH_OAUTH  # Use OAuth for direct access, JWT still supported for WordPress
+AUTH_TYPE = AUTH_DB  # Use DB auth with custom Microsoft OAuth and WordPress JWT support
 AUTH_USER_REGISTRATION = True
 AUTH_USER_REGISTRATION_ROLE = "myportaluser"
 
@@ -138,25 +138,9 @@ ENABLE_PROXY_FIX = True  # Handle reverse proxy headers
 WTF_CSRF_ENABLED = False  # CSRF protection
 # Session configuration consolidated with CORS settings below
 
-# Azure OAuth Configuration - ENABLED for direct access
-# Use the same tenant/client IDs as JWT validation for consistency
-OAUTH_PROVIDERS = [
-    {
-        'name': 'azure',
-        'token_key': 'access_token',
-        'icon': 'fa-microsoft',
-        'remote_app': {
-            'client_id': os.getenv('AZURE_CLIENT_ID', '39ad4e02-9a76-4464-810b-eac74dbc0950'),
-            'client_secret': os.getenv('AZURE_CLIENT_SECRET', 'y1p8Q~fG~hGudO7N6s56Wj~82j0c56P5wfsnJb2a'),
-            'api_base_url': 'https://graph.microsoft.com/v1.0/',
-            'client_kwargs': {
-                'scope': 'openid email profile User.Read Group.Read.All'
-            },
-            'access_token_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")}/oauth2/v2.0/token',
-            'authorize_url': f'https://login.microsoftonline.com/{os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")}/oauth2/v2.0/authorize',
-        }
-    }
-]
+# Custom Microsoft OAuth Configuration (no Flask-AppBuilder conflicts)
+# Flask-AppBuilder OAUTH_PROVIDERS disabled - using custom implementation
+# OAUTH_PROVIDERS = []  # Disabled - using custom Microsoft OAuth routes
 
 # Azure AD Configuration for OBO Token Validation
 AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")
@@ -374,100 +358,8 @@ class UnifiedSecurityManager(SupersetSecurityManager):
        
         logging.critical(f"Using '{self.auth_user_jwt_username_key}' as the JWT username key")
  
-    def auth_user_oauth(self, userinfo):
-        """
-        OAuth authentication for direct Superset access via Azure AD
-        Uses the same unified user creation and Azure SQL group mapping as JWT authentication
-        """
-        logging.critical("========== AUTH_USER_OAUTH METHOD CALLED ==========")
-        logging.critical(f"OAuth userinfo: {userinfo}")
-        
-        try:
-            # Extract email/username from OAuth userinfo
-            user_id = userinfo.get('preferred_username') or userinfo.get('email') or userinfo.get('upn')
-            if not user_id:
-                logging.critical("ERROR: No user identifier found in OAuth userinfo")
-                return None
-                
-            # Get groups from OAuth token (should be populated by oauth_user_info method)
-            azure_groups = userinfo.get('groups', [])
-            logging.critical(f"OAuth user {user_id} has {len(azure_groups)} groups: {azure_groups}")
-            
-            # Prepare user_info in same format as JWT authentication
-            user_info = {
-                'email': user_id,
-                'name': userinfo.get('name', user_id),
-                'given_name': userinfo.get('given_name', ''),
-                'family_name': userinfo.get('family_name', ''),
-                'azure_groups': azure_groups
-            }
-            
-            # Use the same unified user creation logic as JWT authentication
-            user = self._create_or_update_user(user_id, user_info, 'oauth')
-            
-            if user:
-                logging.critical(f"OAuth authentication successful for {user_id}")
-                # Store authentication method in session for continuity
-                from flask import session
-                session['auth_method'] = 'oauth'
-                session['azure_user_email'] = user_id
-                return user
-            else:
-                logging.critical(f"Failed to create/update user for {user_id}")
-                return None
-                
-        except Exception as e:
-            logging.critical(f"OAuth authentication error: {str(e)}")
-            logging.critical(f"OAuth error traceback: {traceback.format_exc()}")
-            return None
-    
-    def oauth_user_info(self, provider, resp):
-        """
-        Called by Flask-AppBuilder to fetch user info from OAuth provider
-        Enriches userinfo with group membership from Microsoft Graph API
-        """
-        logging.critical("========== OAUTH_USER_INFO METHOD CALLED ==========")
-        
-        if provider == 'azure':
-            try:
-                # Get basic user info from Graph API
-                access_token = resp['access_token']
-                headers = {'Authorization': f'Bearer {access_token}'}
-                
-                # Get user profile
-                user_response = requests.get('https://graph.microsoft.com/v1.0/me', headers=headers, timeout=10)
-                if user_response.status_code != 200:
-                    logging.critical(f"Failed to get user info: {user_response.status_code}")
-                    return {}
-                    
-                user_data = user_response.json()
-                logging.critical(f"Graph API user data: {user_data}")
-                
-                # Get group membership (same logic as JWT authentication)
-                groups_response = requests.get('https://graph.microsoft.com/v1.0/me/memberOf', headers=headers, timeout=10)
-                group_ids = []
-                if groups_response.status_code == 200:
-                    groups_data = groups_response.json()
-                    group_ids = [group['id'] for group in groups_data.get('value', [])]
-                    logging.critical(f"Retrieved {len(group_ids)} groups from Graph API: {group_ids}")
-                else:
-                    logging.critical(f"Failed to get groups: {groups_response.status_code}")
-                
-                # Return userinfo in expected format
-                return {
-                    'preferred_username': user_data.get('userPrincipalName'),
-                    'email': user_data.get('mail') or user_data.get('userPrincipalName'),
-                    'name': user_data.get('displayName', ''),
-                    'given_name': user_data.get('givenName', ''),
-                    'family_name': user_data.get('surname', ''),
-                    'groups': group_ids
-                }
-                
-            except Exception as e:
-                logging.critical(f"oauth_user_info error: {str(e)}")
-                return {}
-        
-        return {}
+    # Flask-AppBuilder OAuth methods removed - using custom Microsoft OAuth implementation
+    # Custom OAuth routes handle authentication directly without Flask-AppBuilder conflicts
     
     def _get_user_groups_from_graph(self, access_token):
         """
@@ -785,33 +677,24 @@ class UnifiedSecurityManager(SupersetSecurityManager):
     
     def unauthorized(self):
         """
-        CRITICAL: Redirect unauthorized users directly to Azure OAuth
-        This bypasses the login page and goes straight to Microsoft authentication
+        CRITICAL: Redirect unauthorized users to custom Microsoft OAuth
+        Bypasses Flask-AppBuilder OAuth and uses our clean custom implementation
         """
         from flask import redirect, url_for
         
-        logging.critical("========== UNAUTHORIZED ACCESS - REDIRECTING TO AZURE OAUTH ==========")
-        logging.critical("🚨 UNAUTHORIZED METHOD CALLED - REDIRECTING TO AZURE LOGIN 🚨")
+        logging.critical("========== UNAUTHORIZED ACCESS - REDIRECTING TO CUSTOM MICROSOFT OAUTH ==========")
+        logging.critical("🚨 UNAUTHORIZED METHOD CALLED - USING CUSTOM OAUTH ROUTE 🚨")
         
         try:
-            # Use Flask-AppBuilder's OAuth system for proper redirect
-            oauth_login_url = url_for('AuthOAuthView.login', provider='azure')
-            logging.critical(f"[OAUTH REDIRECT] Sending user to: {oauth_login_url}")
-            return redirect(oauth_login_url)
+            # Use our custom Microsoft OAuth route (no Flask-AppBuilder conflicts)
+            custom_oauth_url = url_for('microsoft_auth')
+            logging.critical(f"[CUSTOM OAUTH] Redirecting to: {custom_oauth_url}")
+            return redirect(custom_oauth_url)
         except Exception as e:
-            logging.critical(f"OAuth redirect failed: {str(e)}")
-            # Fallback to manual Microsoft URL if OAuth system fails
-            tenant_id = AZURE_TENANT_ID
-            client_id = AZURE_CLIENT_ID
-            fallback_url = (
-                f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
-                f"?client_id={client_id}"
-                f"&response_type=code"
-                f"&redirect_uri=https://stg-dashboards.rmcare.com/oauth-authorized/azure"
-                f"&scope=openid%20email%20profile%20User.Read%20Group.Read.All"
-                f"&response_mode=query"
-            )
-            logging.critical(f"[FALLBACK REDIRECT] Using manual URL: {fallback_url}")
+            logging.critical(f"Custom OAuth redirect failed: {str(e)}")
+            # Direct fallback to our custom route path
+            fallback_url = "/auth/microsoft"
+            logging.critical(f"[FALLBACK] Using direct path: {fallback_url}")
             return redirect(fallback_url)
 
     def login_url(self, next_url=None):
@@ -1416,6 +1299,158 @@ def flask_app_mutator(app):
         result["jinja_context_addons"] = {k: str(v) for k, v in app.config.get('JINJA_CONTEXT_ADDONS', {}).items()}
         
         return json.dumps(result, indent=2)
+
+    # Custom Microsoft OAuth Routes (no Flask-AppBuilder conflicts)
+    @app.route('/auth/microsoft')
+    def microsoft_auth():
+        """
+        Custom Microsoft OAuth initiation - bypasses Flask-AppBuilder OAuth system
+        Redirects directly to Microsoft authentication with proper callback URL
+        """
+        import secrets
+        from flask import session
+        
+        logging.critical("========== CUSTOM MICROSOFT OAUTH INITIATED ==========")
+        
+        # Generate state and nonce for security
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        
+        # Store in session for validation
+        session['oauth_state'] = state
+        session['oauth_nonce'] = nonce
+        
+        # Build Microsoft OAuth URL with correct parameters
+        tenant_id = AZURE_TENANT_ID
+        client_id = AZURE_CLIENT_ID
+        redirect_uri = "https://stg-dashboards.rmcare.com/auth/callback"
+        
+        microsoft_url = (
+            f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
+            f"?client_id={client_id}"
+            f"&response_type=code"
+            f"&redirect_uri={redirect_uri}"
+            f"&scope=openid%20email%20profile%20User.Read%20Group.Read.All"
+            f"&state={state}"
+            f"&nonce={nonce}"
+            f"&response_mode=query"
+        )
+        
+        logging.critical(f"[CUSTOM OAUTH] Redirecting to Microsoft: {microsoft_url}")
+        return redirect(microsoft_url)
+    
+    @app.route('/auth/callback')
+    def microsoft_callback():
+        """
+        Custom Microsoft OAuth callback - handles the response from Microsoft
+        Uses same unified user creation logic as WordPress JWT authentication
+        """
+        logging.critical("========== CUSTOM MICROSOFT OAUTH CALLBACK ==========")
+        
+        try:
+            # Validate state parameter for security
+            received_state = request.args.get('state')
+            stored_state = session.get('oauth_state')
+            
+            if not received_state or not stored_state or received_state != stored_state:
+                logging.critical(f"OAuth state mismatch: received={received_state}, stored={stored_state}")
+                return "Authentication failed: Invalid state parameter", 400
+            
+            # Get authorization code
+            auth_code = request.args.get('code')
+            if not auth_code:
+                error = request.args.get('error')
+                error_description = request.args.get('error_description')
+                logging.critical(f"OAuth error: {error} - {error_description}")
+                return f"Authentication failed: {error_description or error}", 400
+            
+            # Exchange code for access token
+            token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
+            token_data = {
+                'client_id': AZURE_CLIENT_ID,
+                'client_secret': os.getenv('AZURE_CLIENT_SECRET', 'y1p8Q~fG~hGudO7N6s56Wj~82j0c56P5wfsnJb2a'),
+                'code': auth_code,
+                'grant_type': 'authorization_code',
+                'redirect_uri': 'https://stg-dashboards.rmcare.com/auth/callback'
+            }
+            
+            token_response = requests.post(token_url, data=token_data, timeout=10)
+            if token_response.status_code != 200:
+                logging.critical(f"Token exchange failed: {token_response.status_code} - {token_response.text}")
+                return "Authentication failed: Could not exchange code for token", 400
+            
+            token_info = token_response.json()
+            access_token = token_info.get('access_token')
+            
+            if not access_token:
+                logging.critical("No access token in response")
+                return "Authentication failed: No access token received", 400
+            
+            # Get user info from Microsoft Graph
+            headers = {'Authorization': f'Bearer {access_token}'}
+            
+            # Get user profile
+            user_response = requests.get('https://graph.microsoft.com/v1.0/me', headers=headers, timeout=10)
+            if user_response.status_code != 200:
+                logging.critical(f"Failed to get user profile: {user_response.status_code}")
+                return "Authentication failed: Could not retrieve user profile", 400
+            
+            user_data = user_response.json()
+            logging.critical(f"Microsoft user data: {user_data}")
+            
+            # Get user groups
+            groups_response = requests.get('https://graph.microsoft.com/v1.0/me/memberOf', headers=headers, timeout=10)
+            group_ids = []
+            if groups_response.status_code == 200:
+                groups_data = groups_response.json()
+                group_ids = [group['id'] for group in groups_data.get('value', [])]
+                logging.critical(f"User groups: {len(group_ids)} groups found")
+            else:
+                logging.critical(f"Failed to get groups: {groups_response.status_code}")
+            
+            # Prepare user info in same format as JWT authentication
+            user_id = user_data.get('userPrincipalName') or user_data.get('mail')
+            if not user_id:
+                logging.critical("No user identifier found in Microsoft response")
+                return "Authentication failed: No user identifier found", 400
+            
+            user_info = {
+                'email': user_id,
+                'name': user_data.get('displayName', user_id),
+                'given_name': user_data.get('givenName', ''),
+                'family_name': user_data.get('surname', ''),
+                'azure_groups': group_ids
+            }
+            
+            # Use the same unified user creation logic as JWT authentication
+            security_manager = app.appbuilder.sm
+            user = security_manager._create_or_update_user(user_id, user_info, 'microsoft_oauth')
+            
+            if user:
+                logging.critical(f"Custom OAuth authentication successful for {user_id}")
+                
+                # Log the user in using Flask-Login
+                from flask_login import login_user
+                login_user(user)
+                
+                # Store authentication method in session
+                session['auth_method'] = 'microsoft_oauth'
+                session['azure_user_email'] = user_id
+                
+                # Clean up OAuth session data
+                session.pop('oauth_state', None)
+                session.pop('oauth_nonce', None)
+                
+                # Redirect to Superset dashboard
+                return redirect('/')
+            else:
+                logging.critical(f"Failed to create/update user for {user_id}")
+                return "Authentication failed: Could not create user account", 500
+                
+        except Exception as e:
+            logging.critical(f"Custom OAuth callback error: {str(e)}")
+            logging.critical(f"OAuth callback traceback: {traceback.format_exc()}")
+            return "Authentication failed: Internal error", 500
  
     return app
  
