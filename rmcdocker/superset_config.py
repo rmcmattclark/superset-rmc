@@ -1337,7 +1337,22 @@ def flask_app_mutator(app):
         )
         
         logging.critical(f"[CUSTOM OAUTH] Redirecting to Microsoft: {microsoft_url}")
-        return redirect(microsoft_url)
+        
+        # Use JavaScript redirect to bypass reverse proxy URL interception
+        return f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Redirecting to Microsoft...</title>
+        </head>
+        <body>
+            <p>Redirecting to Microsoft authentication...</p>
+            <script>
+                window.location.href = "{microsoft_url}";
+            </script>
+        </body>
+        </html>
+        '''
     
     @app.route('/auth/callback')
     def microsoft_callback():
