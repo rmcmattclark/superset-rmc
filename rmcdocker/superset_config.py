@@ -1005,11 +1005,13 @@ def flask_app_mutator(app):
 
     @app.route('/api/rmc/sso/init', methods=['POST'])
     def rmc_sso_init():
+        logging.critical("========== WORDPRESS SSO AUTHENTICATION START ==========")
         try:
             data = request.get_json(silent=True) or {}
             payload_b64 = data.get('payload')
             sig = data.get('sig')
             if not payload_b64 or not sig:
+                logging.critical("ERROR: Missing payload or signature in WordPress request")
                 return (json.dumps({'error': 'missing payload or sig'}), 400, {'Content-Type': 'application/json'})
 
             # Get shared secret from environment variable (must match WordPress wp-config.php)
@@ -1018,25 +1020,33 @@ def flask_app_mutator(app):
                 logging.critical("CRITICAL ERROR: RMC_AUTH_KEY not found in environment variables!")
                 return (json.dumps({'error': 'server configuration error'}), 500, {'Content-Type': 'application/json'})
             
-            logging.debug(f"Using RMC_AUTH_KEY from environment: {shared[:10]}...")
+            logging.critical(f"STEP 1: Using RMC_AUTH_KEY from environment: {shared[:10]}...")
 
             try:
                 payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
+                logging.critical(f"STEP 2: Payload decoded successfully, length: {len(payload_json)}")
             except Exception as e:
-                logging.critical(f"Payload decode error before signature check: {str(e)}")
+                logging.critical(f"ERROR: Payload decode error before signature check: {str(e)}")
                 return (json.dumps({'error': 'bad payload encoding'}), 400, {'Content-Type': 'application/json'})
 
             computed = hmac.new(shared.encode('utf-8'), payload_json.encode('utf-8'), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(computed, sig):
+                logging.critical("ERROR: HMAC signature verification failed")
                 return (json.dumps({'error': 'invalid signature'}), 401, {'Content-Type': 'application/json'})
+            
+            logging.critical("STEP 3: HMAC signature verified successfully")
 
             pointer = json.loads(payload_json)
+            logging.critical(f"STEP 4: Payload parsed, available fields: {list(pointer.keys())}")
 
             upn = pointer.get('upn') or pointer.get('email')
             name = pointer.get('name') or upn
             email = pointer.get('email') or upn
             if not upn:
+                logging.critical("ERROR: Missing UPN in WordPress payload")
                 return (json.dumps({'error': 'missing upn'}), 400, {'Content-Type': 'application/json'})
+            
+            logging.critical(f"STEP 5: User identification - UPN: {upn}, Name: {name}")
 
             exchange_url = os.getenv('WP_SSO_EXCHANGE_URL', '')
             if exchange_url:
@@ -1047,46 +1057,83 @@ def flask_app_mutator(app):
                         upn = extra.get('upn', upn)
                         name = extra.get('name', name)
                         email = extra.get('email', email)
+                        logging.critical(f"STEP 6: Exchange service updated user info - UPN: {upn}")
+                    else:
+                        logging.critical(f"STEP 6: Exchange service returned status {resp.status_code}")
                 except Exception as ex_err:
-                    logging.critical(f"WP exchange error: {str(ex_err)}")
+                    logging.critical(f"ERROR: WP exchange error: {str(ex_err)}")
 
+            # AZURE GROUP GUID PROCESSING START
+            logging.critical("========== AZURE GROUP GUID PROCESSING START ==========")
             resolved_role_names: list[str] = []
             try:
                 mapping_db_uri = os.getenv('AZURE_SQL_CONNECTION_STRING')
-                if mapping_db_uri:
+                if not mapping_db_uri:
+                    logging.critical("WARNING: No AZURE_SQL_CONNECTION_STRING found, skipping group mapping")
+                else:
+                    logging.critical(f"STEP 7: Azure SQL connection string found, length: {len(mapping_db_uri)}")
                     from sqlalchemy import create_engine, text
                     engine = create_engine(mapping_db_uri, pool_pre_ping=True)
                     groups = pointer.get('groups') or []
+                    logging.critical(f"STEP 8: Extracted {len(groups)} Azure group GUIDs from WordPress payload")
+                    logging.critical(f"STEP 8a: Azure group GUIDs: {groups}")
+                    
                     if isinstance(groups, list) and groups:
                         # Map GUIDs to DisplayName
                         group_table = os.getenv('AZURE_ROLE_MAPPING_TABLE', 'dbo.ActiveEntraGroups')
                         group_id_col = os.getenv('AZURE_ROLE_MAPPING_GROUP_COL', 'GroupId')
                         group_name_col = os.getenv('AZURE_ROLE_MAPPING_ROLE_COL', 'DisplayName')
+                        logging.critical(f"STEP 9: Using Azure SQL table: {group_table}, Group ID column: {group_id_col}, Name column: {group_name_col}")
+                        
                         placeholders = ','.join([f":g{j}" for j in range(len(groups))])
                         sql = text(
                             f"SELECT {group_name_col} AS role_name FROM {group_table} WHERE {group_id_col} IN ({placeholders})"
                         )
                         params = {f"g{j}": groups[j] for j in range(len(groups))}
+                        logging.critical(f"STEP 10: Executing SQL query with {len(params)} parameters")
+                        logging.critical(f"STEP 10a: SQL query: {sql}")
+                        logging.critical(f"STEP 10b: Query parameters: {params}")
+                        
                         with engine.connect() as conn:
                             rows = conn.execute(sql, params).fetchall()
-                            resolved_role_names.extend([r.role_name for r in rows])
+                            logging.critical(f"STEP 11: Azure SQL query returned {len(rows)} rows")
+                            for i, row in enumerate(rows):
+                                logging.critical(f"STEP 11a: Row {i+1}: role_name = '{row.role_name}'")
+                            resolved_role_names.extend([r.role_name for r in rows if r.role_name])
+                            none_count = sum(1 for r in rows if r.role_name is None)
+                            if none_count > 0:
+                                logging.critical(f"WARNING: Found {none_count} NULL role names in Azure SQL results")
+                        
+                        logging.critical(f"STEP 12: After Azure SQL mapping, resolved {len(resolved_role_names)} role names: {resolved_role_names}")
                     else:
+                        logging.critical("STEP 8b: No Azure group GUIDs found, falling back to UPN-based mapping")
                         # Fallback to UPN→role mapping view
                         upn_table = os.getenv('AZURE_UPN_ROLE_VIEW', 'UserGroupMembershipView')
                         upn_col = os.getenv('AZURE_ROLE_MAPPING_UPN_COL', 'upn')
                         role_col = os.getenv('AZURE_ROLE_MAPPING_ROLE_COL', 'role_name')
+                        logging.critical(f"STEP 9b: Using UPN fallback table: {upn_table}, UPN column: {upn_col}, Role column: {role_col}")
+                        
                         sql = text(
                             f"SELECT {role_col} AS role_name FROM {upn_table} WHERE {upn_col} = :upn"
                         )
+                        logging.critical(f"STEP 10b: Executing UPN fallback query for UPN: {upn}")
                         with engine.connect() as conn:
                             rows = conn.execute(sql, {'upn': upn}).fetchall()
-                            resolved_role_names.extend([r.role_name for r in rows])
+                            logging.critical(f"STEP 11b: UPN fallback query returned {len(rows)} rows")
+                            for i, row in enumerate(rows):
+                                logging.critical(f"STEP 11c: Fallback Row {i+1}: role_name = '{row.role_name}'")
+                            resolved_role_names.extend([r.role_name for r in rows if r.role_name])
+                        
+                        logging.critical(f"STEP 12b: After UPN fallback mapping, resolved {len(resolved_role_names)} role names: {resolved_role_names}")
             except Exception as map_err:
-                logging.critical(f"UPN role mapping error: {str(map_err)}")
+                logging.critical(f"ERROR: Azure role mapping error: {str(map_err)}")
+                logging.critical(f"Mapping error traceback: {traceback.format_exc()}")
 
+            # ROLE FILTERING AND ASSIGNMENT START
+            logging.critical("========== ROLE FILTERING START ==========")
             default_role_name = os.getenv('DEFAULT_PORTAL_ROLE', 'myportaluser')
-            if default_role_name not in resolved_role_names:
-                resolved_role_names.append(default_role_name)
+            pre_filter_roles = resolved_role_names.copy()
+            logging.critical(f"STEP 13: Before filtering, have {len(pre_filter_roles)} roles: {pre_filter_roles}")
 
             # Apply naming filters: startwith 'dashboard' or contains 'myportal'/'beta myportal'
             try:
@@ -1095,25 +1142,56 @@ def flask_app_mutator(app):
                     lower = (rn or '').lower()
                     if lower.startswith('dashboard') or ('myportal' in lower) or ('beta myportal' in lower):
                         filtered.append(rn)
+                        logging.critical(f"STEP 14a: Role '{rn}' passed filter (matches dashboard/myportal criteria)")
+                    else:
+                        logging.critical(f"STEP 14b: Role '{rn}' FILTERED OUT (does not match dashboard/myportal criteria)")
+                
                 if filtered:
                     resolved_role_names = filtered
-            except Exception as _:
-                pass
+                    logging.critical(f"STEP 15: After filtering, kept {len(resolved_role_names)} roles: {resolved_role_names}")
+                else:
+                    logging.critical("STEP 15: No roles passed filter, keeping original list")
+            except Exception as filter_err:
+                logging.critical(f"ERROR: Role filtering error: {str(filter_err)}")
 
-            # Ensure user and roles
+            if default_role_name not in resolved_role_names:
+                resolved_role_names.append(default_role_name)
+                logging.critical(f"STEP 16: Added default role '{default_role_name}' to role list")
+            
+            logging.critical(f"STEP 17: FINAL ROLE LIST for user {upn}: {resolved_role_names}")
+
+            # USER CREATION AND ROLE ASSIGNMENT START
+            logging.critical("========== USER CREATION AND ROLE ASSIGNMENT START ==========")
             try:
                 sm = app.appbuilder.sm
                 user = sm.find_user(username=upn)
+                
+                if user:
+                    logging.critical(f"STEP 18: Existing user found: {user.username}")
+                    logging.critical(f"STEP 18a: Current user roles: {[r.name for r in user.roles] if user.roles else 'None'}")
+                else:
+                    logging.critical(f"STEP 18: User '{upn}' not found, will create new user")
+                
                 first_name = name.split(' ', 1)[0] if name else upn
                 last_name = name.split(' ', 1)[1] if name and ' ' in name else ''
+                logging.critical(f"STEP 19: User names - First: '{first_name}', Last: '{last_name}'")
+                
                 role_objects = []
                 for rn in resolved_role_names:
+                    logging.critical(f"STEP 20a: Processing role '{rn}'...")
                     role = sm.find_role(rn)
                     if not role:
+                        logging.critical(f"STEP 20b: Role '{rn}' not found, creating new role")
                         role = sm.add_role(rn)
-                        logging.critical(f"Created role: {rn}")
+                        logging.critical(f"STEP 20c: Created role: {rn}")
+                    else:
+                        logging.critical(f"STEP 20d: Found existing role: {rn}")
                     role_objects.append(role)
+                
+                logging.critical(f"STEP 21: Created {len(role_objects)} role objects for assignment")
+                
                 if not user:
+                    logging.critical("STEP 22: Creating new user...")
                     user = sm.add_user(
                         username=upn,
                         first_name=first_name,
@@ -1121,17 +1199,36 @@ def flask_app_mutator(app):
                         email=email,
                         role=role_objects[0] if role_objects else None
                     )
+                    if user:
+                        logging.critical(f"STEP 22a: User created successfully: {user.username}")
+                    else:
+                        logging.critical("ERROR: User creation returned None")
                 else:
+                    logging.critical("STEP 22: Updating existing user roles...")
                     user.roles = role_objects
+                    sm.update_user(user)
+                    logging.critical(f"STEP 22a: User roles updated")
+                
+                logging.critical(f"STEP 23: Final user roles assigned: {[r.name for r in user.roles] if user and user.roles else 'None'}")
+                
                 # Log in
+                logging.critical("STEP 24: Logging in user...")
                 from flask_login import login_user
                 login_user(user)
-                return (json.dumps({'status': 'ok', 'user': upn, 'roles': [r.name for r in user.roles]}), 200, {'Content-Type': 'application/json'})
+                logging.critical("STEP 24a: User logged in successfully")
+                
+                final_roles = [r.name for r in user.roles] if user and user.roles else []
+                logging.critical(f"========== WORDPRESS SSO AUTHENTICATION COMPLETE ==========")
+                logging.critical(f"FINAL RESULT - User: {upn}, Roles: {final_roles}")
+                
+                return (json.dumps({'status': 'ok', 'user': upn, 'roles': final_roles}), 200, {'Content-Type': 'application/json'})
             except Exception as user_err:
-                logging.critical(f"User setup error: {str(user_err)}")
+                logging.critical(f"ERROR: User setup error: {str(user_err)}")
+                logging.critical(f"User setup traceback: {traceback.format_exc()}")
                 return (json.dumps({'error': 'user setup failed'}), 500, {'Content-Type': 'application/json'})
         except Exception as e:
-            logging.critical(f"SSO init error: {str(e)}")
+            logging.critical(f"ERROR: SSO init error: {str(e)}")
+            logging.critical(f"SSO init traceback: {traceback.format_exc()}")
             return (json.dumps({'error': 'server error'}), 500, {'Content-Type': 'application/json'})
 
     @app.route('/debug-jwt')
