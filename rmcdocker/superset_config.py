@@ -129,7 +129,9 @@ AUTH_ROLE_PUBLIC = 'myportaluser'  # Use myportaluser as public role instead of 
 
 # Production security settings
 ENABLE_PROXY_FIX = True  # Handle reverse proxy headers
-WTF_CSRF_ENABLED = False  # CSRF protection
+WTF_CSRF_ENABLED = False  # CSRF disabled for WordPress external auth
+WTF_CSRF_CHECK_DEFAULT = False  # Disable CSRF checking by default
+CSRF_ENABLED = False  # Legacy CSRF setting
 
 # Azure AD Configuration for OBO Token Validation
 AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")
@@ -1134,7 +1136,6 @@ def flask_app_mutator(app):
             logging.critical(f"SSO init error: {str(e)}")
             return (json.dumps({'error': 'server error'}), 500, {'Content-Type': 'application/json'})
 
-    rmc_sso_init._csrf_exempt = True
     @app.route('/debug-jwt')
     def debug_jwt():
         token = request.args.get('proof')
