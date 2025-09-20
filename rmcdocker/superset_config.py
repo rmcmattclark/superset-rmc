@@ -648,7 +648,6 @@ class UnifiedSecurityManager(SupersetSecurityManager):
             logging.critical(f"Role update traceback: {traceback.format_exc()}")
         
         try:
-            g.user = user
             from flask_login import login_user
             login_user(user, remember=True)  # Remember for cross-domain session sharing
             logging.critical(f"User logged in via flask_login.login_user(): {user.username}")
@@ -1127,7 +1126,6 @@ def flask_app_mutator(app):
                 # Log in
                 from flask_login import login_user
                 login_user(user)
-                g.user = user
                 return (json.dumps({'status': 'ok', 'user': upn, 'roles': [r.name for r in user.roles]}), 200, {'Content-Type': 'application/json'})
             except Exception as user_err:
                 logging.critical(f"User setup error: {str(user_err)}")
