@@ -29,9 +29,9 @@ AUTH_USER_REGISTRATION = False  # Disable self-registration for security
 AUTH_USER_REGISTRATION_ROLE = "Public"
 
 # Security settings
-WTF_CSRF_ENABLED = True  # Enable CSRF protection for admin interface
-WTF_CSRF_CHECK_DEFAULT = True
-CSRF_ENABLED = True
+WTF_CSRF_ENABLED = False  # Disable CSRF to match staging environment
+WTF_CSRF_CHECK_DEFAULT = False
+CSRF_ENABLED = False
 ENABLE_PROXY_FIX = True
 
 # Redis & Celery configuration (shared with main container)
