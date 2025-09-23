@@ -142,11 +142,11 @@ EXTRA_SEQUENTIAL_COLOR_SCHEMES = [
 "colors": ['#e5af55', '#e58e5b', '#d87168', '#bd5d75', '#98507b', '#6b4879', '#3d3f6c', '#063457']
 }]
 
-# Session Configuration
-SESSION_COOKIE_DOMAIN = None  # Different from main container to avoid conflicts
+# Session Configuration - Match main container for user compatibility
+SESSION_COOKIE_DOMAIN = '.rmcare.com'  # Same as main container for shared sessions
 SESSION_COOKIE_SECURE = True  # HTTPS only in production
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = 'Lax'  # More restrictive than main container
+SESSION_COOKIE_SAMESITE = 'None'  # Match main container settings
 SESSION_PERMANENT = False
 PERMANENT_SESSION_LIFETIME = 3600  # 1 hour session timeout
 
@@ -156,7 +156,7 @@ DASHBOARD_HORIZONTAL_FILTER_BAR_DEFAULT = True
 # No custom Flask app mutator - use standard Superset behavior
 def flask_app_mutator(app):
     """
-    Simple app mutator that ensures required roles exist
+    App mutator that ensures required roles exist and logs user information
     """
     try:
         security_manager = app.appbuilder.sm
@@ -170,6 +170,16 @@ def flask_app_mutator(app):
                 security_manager.add_role(role_name)
             else:
                 logging.info(f"Role already exists: {role_name}")
+        
+        # Debug: List existing users and their roles
+        try:
+            users = security_manager.get_all_users()
+            logging.info(f"Found {len(users)} users in database:")
+            for user in users[:10]:  # Limit to first 10 users for log readability
+                roles = [role.name for role in user.roles] if user.roles else []
+                logging.info(f"  User: {user.username} | Email: {user.email} | Roles: {roles}")
+        except Exception as user_debug_error:
+            logging.warning(f"Could not debug users: {user_debug_error}")
         
         logging.info("Admin container initialization complete")
         
