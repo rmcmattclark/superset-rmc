@@ -156,12 +156,12 @@ DASHBOARD_HORIZONTAL_FILTER_BAR_DEFAULT = True
 # No custom Flask app mutator - use standard Superset behavior
 def flask_app_mutator(app):
     """
-    App mutator that ensures required roles exist and logs user information
+    Minimal admin app mutator - no custom session tracking to avoid LocalProxy issues
     """
     try:
         security_manager = app.appbuilder.sm
         
-        # Ensure basic roles exist
+        # Only ensure basic roles exist - no user debugging to avoid session issues
         required_roles = ["Admin", "Alpha", "Gamma", "Public"]
         
         for role_name in required_roles:
@@ -171,25 +171,44 @@ def flask_app_mutator(app):
             else:
                 logging.info(f"Role already exists: {role_name}")
         
-        # Debug: List existing users and their roles
-        try:
-            users = security_manager.get_all_users()
-            logging.info(f"Found {len(users)} users in database:")
-            for user in users[:10]:  # Limit to first 10 users for log readability
-                roles = [role.name for role in user.roles] if user.roles else []
-                logging.info(f"  User: {user.username} | Email: {user.email} | Roles: {roles}")
-        except Exception as user_debug_error:
-            logging.warning(f"Could not debug users: {user_debug_error}")
-        
         logging.info("Admin container initialization complete")
         
     except Exception as e:
         logging.exception(f"Error in admin app mutator: {e}")
+    
+    # CRITICAL: Remove any before_request handlers that might cause LocalProxy issues
+    # Clear all before_request_funcs to prevent inheritance from main container
+    if hasattr(app, 'before_request_funcs'):
+        original_funcs = app.before_request_funcs.copy()
+        app.before_request_funcs.clear()
+        logging.info("Cleared inherited before_request handlers to prevent LocalProxy issues")
 
 FLASK_APP_MUTATOR = flask_app_mutator
 
 # Disable reCAPTCHA
 RECAPTCHA_PUBLIC_KEY = ""
+
+# CRITICAL: Disable any user activity tracking that might cause LocalProxy issues
+ENABLE_USER_ACTIVITY_LOGGING = False
+USER_ACTIVITY_LOG_TABLE = None
+
+# Disable any custom logging or tracking that might serialize LocalProxy objects
+import logging
+class NoLocalProxyFilter(logging.Filter):
+    """Filter to prevent LocalProxy objects from being logged/processed"""
+    def filter(self, record):
+        # Skip any log records that might contain LocalProxy objects
+        if hasattr(record, 'args') and record.args:
+            try:
+                str(record.args)  # Try to serialize args
+                return True
+            except:
+                return False  # Skip if serialization fails
+        return True
+
+# Apply filter to prevent LocalProxy serialization issues
+for handler in logging.getLogger().handlers:
+    handler.addFilter(NoLocalProxyFilter())
 
 logging.info("========== ADMIN CONTAINER CONFIGURATION LOADED ==========")
 logging.info("Using standard Flask-AppBuilder AUTH_DB authentication")
