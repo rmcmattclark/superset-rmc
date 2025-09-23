@@ -207,10 +207,10 @@ def flask_app_mutator(app):
     # SURGICAL FIX: Disable the problematic user activity logging that causes LocalProxy issues
     try:
         # Import and patch the specific logging view that's causing the issue
-        from superset.views.log import LogApi
+        from superset.views.log.api import LogRestApi
         
         # Override the POST method that tries to serialize LocalProxy objects
-        original_post = LogApi.post
+        original_post = LogRestApi.post
         
         def safe_log_post(self):
             """Safe version of log POST that doesn't serialize LocalProxy objects"""
@@ -225,11 +225,11 @@ def flask_app_mutator(app):
                 else:
                     raise
         
-        LogApi.post = safe_log_post
-        logging.critical(f"[DEBUG] Patched LogApi.post to prevent LocalProxy serialization")
+        LogRestApi.post = safe_log_post
+        logging.critical(f"[DEBUG] Patched LogRestApi.post to prevent LocalProxy serialization")
         
     except Exception as log_patch_error:
-        logging.critical(f"[DEBUG] Could not patch LogApi: {str(log_patch_error)}")
+        logging.critical(f"[DEBUG] Could not patch LogRestApi: {str(log_patch_error)}")
     
     # Also try to patch the base view method
     try:
