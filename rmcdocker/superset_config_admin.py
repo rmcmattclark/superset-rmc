@@ -176,12 +176,21 @@ def flask_app_mutator(app):
     except Exception as e:
         logging.exception(f"Error in admin app mutator: {e}")
     
-    # CRITICAL: Remove any before_request handlers that might cause LocalProxy issues
-    # Clear all before_request_funcs to prevent inheritance from main container
-    if hasattr(app, 'before_request_funcs'):
-        original_funcs = app.before_request_funcs.copy()
-        app.before_request_funcs.clear()
-        logging.info("Cleared inherited before_request handlers to prevent LocalProxy issues")
+    # CRITICAL: Override problematic before_request handlers while keeping essential ones
+    # We need to keep Flask-AppBuilder's user context but remove custom session tracking
+    @app.before_request
+    def minimal_user_context():
+        """Minimal user context setup without LocalProxy serialization"""
+        from flask import g
+        from flask_login import current_user
+        
+        # Set basic user context that Flask-AppBuilder expects
+        g.user = current_user
+        
+        # Skip any custom session tracking or logging that causes LocalProxy issues
+        return None
+    
+    logging.info("Set up minimal user context to prevent LocalProxy issues")
 
 FLASK_APP_MUTATOR = flask_app_mutator
 
@@ -190,25 +199,6 @@ RECAPTCHA_PUBLIC_KEY = ""
 
 # CRITICAL: Disable any user activity tracking that might cause LocalProxy issues
 ENABLE_USER_ACTIVITY_LOGGING = False
-USER_ACTIVITY_LOG_TABLE = None
-
-# Disable any custom logging or tracking that might serialize LocalProxy objects
-import logging
-class NoLocalProxyFilter(logging.Filter):
-    """Filter to prevent LocalProxy objects from being logged/processed"""
-    def filter(self, record):
-        # Skip any log records that might contain LocalProxy objects
-        if hasattr(record, 'args') and record.args:
-            try:
-                str(record.args)  # Try to serialize args
-                return True
-            except:
-                return False  # Skip if serialization fails
-        return True
-
-# Apply filter to prevent LocalProxy serialization issues
-for handler in logging.getLogger().handlers:
-    handler.addFilter(NoLocalProxyFilter())
 
 logging.info("========== ADMIN CONTAINER CONFIGURATION LOADED ==========")
 logging.info("Using standard Flask-AppBuilder AUTH_DB authentication")
