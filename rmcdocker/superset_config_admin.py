@@ -156,12 +156,12 @@ DASHBOARD_HORIZONTAL_FILTER_BAR_DEFAULT = True
 # No custom Flask app mutator - use standard Superset behavior
 def flask_app_mutator(app):
     """
-    Minimal admin app mutator - no custom session tracking to avoid LocalProxy issues
+    Admin app mutator with comprehensive debugging for LocalProxy issues
     """
     try:
         security_manager = app.appbuilder.sm
         
-        # Only ensure basic roles exist - no user debugging to avoid session issues
+        # Only ensure basic roles exist
         required_roles = ["Admin", "Alpha", "Gamma", "Public"]
         
         for role_name in required_roles:
@@ -176,21 +176,96 @@ def flask_app_mutator(app):
     except Exception as e:
         logging.exception(f"Error in admin app mutator: {e}")
     
-    # CRITICAL: Override problematic before_request handlers while keeping essential ones
-    # We need to keep Flask-AppBuilder's user context but remove custom session tracking
+    # DEBUGGING: Comprehensive error tracking for LocalProxy issues
     @app.before_request
-    def minimal_user_context():
-        """Minimal user context setup without LocalProxy serialization"""
-        from flask import g
+    def debug_before_request():
+        """Debug version with comprehensive LocalProxy error tracking"""
+        import traceback
+        from flask import g, request
         from flask_login import current_user
         
-        # Set basic user context that Flask-AppBuilder expects
-        g.user = current_user
-        
-        # Skip any custom session tracking or logging that causes LocalProxy issues
-        return None
+        try:
+            # Log the request path for debugging
+            logging.critical(f"[DEBUG] Before request: {request.path}")
+            
+            # Set user context
+            g.user = current_user
+            
+            # Log user state
+            if hasattr(current_user, 'is_authenticated'):
+                logging.critical(f"[DEBUG] User authenticated: {current_user.is_authenticated}")
+                if current_user.is_authenticated:
+                    logging.critical(f"[DEBUG] User: {getattr(current_user, 'username', 'unknown')}")
+            
+            return None
+            
+        except Exception as before_req_error:
+            logging.critical(f"[DEBUG] Before request error: {str(before_req_error)}")
+            logging.critical(f"[DEBUG] Before request traceback: {traceback.format_exc()}")
+            return None
     
-    logging.info("Set up minimal user context to prevent LocalProxy issues")
+    # DEBUGGING: Override the problematic add_user_to_db_session function
+    original_after_request_funcs = app.after_request_funcs.copy()
+    
+    @app.after_request  
+    def debug_after_request(response):
+        """Debug after_request to catch LocalProxy serialization attempts"""
+        import traceback
+        from flask import request
+        
+        try:
+            logging.critical(f"[DEBUG] After request: {request.path} -> {response.status_code}")
+            
+            # Call original after_request handlers with error catching
+            for func_list in original_after_request_funcs.values():
+                for func in func_list:
+                    try:
+                        func(response)
+                    except Exception as after_error:
+                        if "LocalProxy" in str(after_error):
+                            logging.critical(f"[DEBUG] FOUND LOCALPROXY ERROR in after_request!")
+                            logging.critical(f"[DEBUG] Function: {func.__name__}")
+                            logging.critical(f"[DEBUG] Error: {str(after_error)}")
+                            logging.critical(f"[DEBUG] Full traceback: {traceback.format_exc()}")
+                            # Don't re-raise - just log and continue
+                        else:
+                            raise
+            
+            return response
+            
+        except Exception as debug_error:
+            logging.critical(f"[DEBUG] After request debug error: {str(debug_error)}")
+            logging.critical(f"[DEBUG] After request traceback: {traceback.format_exc()}")
+            return response
+    
+    # DEBUGGING: Monkey patch the problematic function if it exists
+    try:
+        from superset.views.base import BaseSupersetView
+        if hasattr(BaseSupersetView, 'add_user_to_db_session'):
+            original_add_user = BaseSupersetView.add_user_to_db_session
+            
+            def debug_add_user_to_db_session(self):
+                """Debug version of add_user_to_db_session"""
+                import traceback
+                try:
+                    logging.critical(f"[DEBUG] add_user_to_db_session called")
+                    return original_add_user(self)
+                except Exception as add_user_error:
+                    if "LocalProxy" in str(add_user_error):
+                        logging.critical(f"[DEBUG] LOCALPROXY ERROR in add_user_to_db_session!")
+                        logging.critical(f"[DEBUG] Error: {str(add_user_error)}")
+                        logging.critical(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                        # Return None instead of failing
+                        return None
+                    else:
+                        raise
+            
+            BaseSupersetView.add_user_to_db_session = debug_add_user_to_db_session
+            logging.critical(f"[DEBUG] Patched add_user_to_db_session for debugging")
+    except Exception as patch_error:
+        logging.critical(f"[DEBUG] Could not patch add_user_to_db_session: {str(patch_error)}")
+    
+    logging.info("Set up comprehensive LocalProxy debugging")
 
 FLASK_APP_MUTATOR = flask_app_mutator
 
