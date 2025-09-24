@@ -125,7 +125,7 @@ AUTH_USER_REGISTRATION = True
 AUTH_USER_REGISTRATION_ROLE = "myportaluser"
 
 PUBLIC_ROLE_LIKE = None  # Disable anonymous/public access
-AUTH_ROLE_PUBLIC = 'myportaluser'  # Use myportaluser as public role instead of 'Public'
+AUTH_ROLE_PUBLIC = None  # Require authentication - no public role access
 
 # Production security settings
 ENABLE_PROXY_FIX = True  # Handle reverse proxy headers
