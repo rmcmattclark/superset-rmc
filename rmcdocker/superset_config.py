@@ -125,7 +125,7 @@ AUTH_USER_REGISTRATION = True
 AUTH_USER_REGISTRATION_ROLE = "myportaluser"
 
 PUBLIC_ROLE_LIKE = None  # Disable anonymous/public access
-AUTH_ROLE_PUBLIC = None  # Require authentication - no public role access
+AUTH_ROLE_PUBLIC = 'myportaluser'  # Use myportaluser as public role for iframe embedding
 
 # Production security settings
 ENABLE_PROXY_FIX = True  # Handle reverse proxy headers
@@ -1594,6 +1594,25 @@ def log_all_requests(app):
         if request.path.startswith('/superset/') or 'proof=' in request.query_string.decode():
             logging.critical("*** WORDPRESS JWT REQUEST DETECTED ***")
             logging.critical(f"Full URL: {request.url}")
+        
+        # Security check: Block direct dashboard access for unauthenticated users
+        # Allow WordPress iframe embedding with ?standalone=1
+        if request.path.startswith('/superset/dashboard/'):
+            is_standalone = request.args.get('standalone') == '1'
+            
+            # If NOT standalone mode (direct access), check authentication
+            if not is_standalone:
+                from flask import g, redirect, url_for, current_app
+                
+                # Check if user only has public role (unauthenticated)
+                if hasattr(g, 'user') and g.user and hasattr(g.user, 'roles'):
+                    user_roles = [role.name for role in g.user.roles] if g.user.roles else []
+                    public_role_name = current_app.config.get('AUTH_ROLE_PUBLIC', 'Public')
+                    
+                    # If user only has public role, they need to authenticate for direct access
+                    if len(user_roles) == 1 and public_role_name in user_roles:
+                        logging.critical(f"BLOCKING DIRECT ACCESS: User only has public role {public_role_name}")
+                        return redirect('/auth/microsoft')
     
     return app
 
