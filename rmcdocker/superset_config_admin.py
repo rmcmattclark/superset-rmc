@@ -142,126 +142,42 @@ EXTRA_SEQUENTIAL_COLOR_SCHEMES = [
 "colors": ['#e5af55', '#e58e5b', '#d87168', '#bd5d75', '#98507b', '#6b4879', '#3d3f6c', '#063457']
 }]
 
-# Session Configuration - Match main container for user compatibility
-SESSION_COOKIE_DOMAIN = '.rmcare.com'  # Same as main container for shared sessions
-SESSION_COOKIE_SECURE = True  # HTTPS only in production
+# Session Configuration - Fixed for port-based access
+SESSION_COOKIE_DOMAIN = None  # Let Flask auto-detect correct domain for port access
+SESSION_COOKIE_SECURE = False  # Allow HTTP for port-based access
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = 'None'  # Match main container settings
+SESSION_COOKIE_SAMESITE = 'Lax'  # More permissive for port-based access
 SESSION_PERMANENT = False
 PERMANENT_SESSION_LIFETIME = 3600  # 1 hour session timeout
 
 # This new flag sets the horizontal layout as the default for all NEW dashboards
 DASHBOARD_HORIZONTAL_FILTER_BAR_DEFAULT = True
 
-# No custom Flask app mutator - use standard Superset behavior
+# Standard Flask app mutator - minimal configuration for admin container
 def flask_app_mutator(app):
     """
-    Admin app mutator with comprehensive debugging for LocalProxy issues
+    Admin app mutator - ensures basic roles exist
     """
     try:
         security_manager = app.appbuilder.sm
         
-        # Only ensure basic roles exist
+        # Ensure basic roles exist
         required_roles = ["Admin", "Alpha", "Gamma", "Public"]
         
         for role_name in required_roles:
             if not security_manager.find_role(role_name):
                 logging.info(f"Creating missing role: {role_name}")
                 security_manager.add_role(role_name)
-            else:
-                logging.info(f"Role already exists: {role_name}")
         
         logging.info("Admin container initialization complete")
         
     except Exception as e:
         logging.exception(f"Error in admin app mutator: {e}")
-    
-    # DEBUGGING: Comprehensive error tracking for LocalProxy issues
-    @app.before_request
-    def debug_before_request():
-        """Debug version with comprehensive LocalProxy error tracking"""
-        import traceback
-        from flask import g, request
-        from flask_login import current_user
-        
-        try:
-            # Log the request path for debugging
-            logging.critical(f"[DEBUG] Before request: {request.path}")
-            
-            # Set user context
-            g.user = current_user
-            
-            # Log user state
-            if hasattr(current_user, 'is_authenticated'):
-                logging.critical(f"[DEBUG] User authenticated: {current_user.is_authenticated}")
-                if current_user.is_authenticated:
-                    logging.critical(f"[DEBUG] User: {getattr(current_user, 'username', 'unknown')}")
-            
-            return None
-            
-        except Exception as before_req_error:
-            logging.critical(f"[DEBUG] Before request error: {str(before_req_error)}")
-            logging.critical(f"[DEBUG] Before request traceback: {traceback.format_exc()}")
-            return None
-    
-    # SURGICAL FIX: Disable the problematic user activity logging that causes LocalProxy issues
-    try:
-        # Import and patch the specific logging view that's causing the issue
-        from superset.views.log.api import LogRestApi
-        
-        # Override the POST method that tries to serialize LocalProxy objects
-        original_post = LogRestApi.post
-        
-        def safe_log_post(self):
-            """Safe version of log POST that doesn't serialize LocalProxy objects"""
-            try:
-                return original_post(self)
-            except Exception as log_error:
-                if "LocalProxy" in str(log_error):
-                    logging.warning(f"Skipped user activity logging due to LocalProxy serialization issue")
-                    # Return success response without actually logging
-                    from flask import jsonify
-                    return jsonify({"status": "ok"})
-                else:
-                    raise
-        
-        LogRestApi.post = safe_log_post
-        logging.critical(f"[DEBUG] Patched LogRestApi.post to prevent LocalProxy serialization")
-        
-    except Exception as log_patch_error:
-        logging.critical(f"[DEBUG] Could not patch LogRestApi: {str(log_patch_error)}")
-    
-    # Also try to patch the base view method
-    try:
-        from superset.views.base import BaseSupersetView
-        if hasattr(BaseSupersetView, 'add_user_to_db_session'):
-            original_add_user = BaseSupersetView.add_user_to_db_session
-            
-            def safe_add_user_to_db_session(self):
-                """Safe version that doesn't fail on LocalProxy serialization"""
-                try:
-                    return original_add_user(self)
-                except Exception as add_user_error:
-                    if "LocalProxy" in str(add_user_error):
-                        logging.warning(f"Skipped add_user_to_db_session due to LocalProxy issue")
-                        return None
-                    else:
-                        raise
-            
-            BaseSupersetView.add_user_to_db_session = safe_add_user_to_db_session
-            logging.critical(f"[DEBUG] Patched add_user_to_db_session safely")
-    except Exception as patch_error:
-        logging.critical(f"[DEBUG] Could not patch add_user_to_db_session: {str(patch_error)}")
-    
-    logging.info("Set up comprehensive LocalProxy debugging")
 
 FLASK_APP_MUTATOR = flask_app_mutator
 
 # Disable reCAPTCHA
 RECAPTCHA_PUBLIC_KEY = ""
-
-# CRITICAL: Disable any user activity tracking that might cause LocalProxy issues
-ENABLE_USER_ACTIVITY_LOGGING = False
 
 logging.info("========== ADMIN CONTAINER CONFIGURATION LOADED ==========")
 logging.info("Using standard Flask-AppBuilder AUTH_DB authentication")
