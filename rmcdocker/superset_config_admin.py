@@ -179,7 +179,6 @@ FLASK_APP_MUTATOR = flask_app_mutator
 # Disable reCAPTCHA
 RECAPTCHA_PUBLIC_KEY = ""
 
-logging.info("========== ADMIN CONTAINER CONFIGURATION LOADED ==========")
-logging.info("Using standard Flask-AppBuilder AUTH_DB authentication")
+logging.info("Admin container configuration loaded")
+logging.info("Using Flask-AppBuilder AUTH_DB authentication") 
 logging.info("Admin access available on port 8090")
-logging.info("Login page: http://wx-rpt-02l.rmcare.com:8090/login/")
