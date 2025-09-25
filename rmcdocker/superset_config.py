@@ -342,12 +342,8 @@ azure_token_validator = AzureADTokenValidator(AZURE_AD_CONFIG)
 class UnifiedSecurityManager(SupersetSecurityManager):
     def __init__(self, appbuilder):
         super(UnifiedSecurityManager, self).__init__(appbuilder)
-        logging.critical("========== UNIFIED SECURITY MANAGER - JWT-ONLY MODE ==========")
-        logging.critical("OAuth DISABLED - WordPress iframe JWT authentication ONLY")
-        logging.critical("Login page DISABLED - Always redirects to Microsoft")
+        logging.info("Unified Security Manager initialized - JWT authentication enabled")
         self.auth_user_jwt_username_key = JWT_IDENTITY_CLAIM
-       
-        logging.critical(f"Using '{self.auth_user_jwt_username_key}' as the JWT username key")
  
 
     def _get_user_groups_from_graph(self, access_token):
@@ -357,7 +353,7 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         import time
         
         if not access_token:
-            logging.critical("No access token available for Graph API call")
+            logging.warning("No access token available for Graph API call")
             return []
             
         headers = {'Authorization': f'Bearer {access_token}'}
@@ -369,41 +365,37 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         
         for attempt in range(max_retries):
             try:
-                logging.critical(f"Graph API call attempt {attempt + 1}/{max_retries}")
                 response = requests.get(url, headers=headers, timeout=10)
                 
                 if response.status_code == 200:
                     groups_data = response.json()
                     group_ids = [group['id'] for group in groups_data.get('value', [])]
-                    logging.critical(f"Retrieved {len(group_ids)} groups from Graph API")
+                    logging.info(f"Retrieved {len(group_ids)} groups from Graph API")
                     return group_ids
                     
                 elif response.status_code in [429, 503, 502, 504]:  # Retryable errors
                     delay = base_delay * (2 ** attempt)
-                    logging.critical(f"Graph API retryable error {response.status_code}, retrying in {delay}s")
                     if attempt < max_retries - 1:
                         time.sleep(delay)
                         continue
                     
                 else:  # Non-retryable errors
-                    logging.critical(f"Graph API non-retryable error: {response.status_code} - {response.text}")
+                    logging.error(f"Graph API error: {response.status_code}")
                     return []
                     
             except requests.exceptions.Timeout:
                 delay = base_delay * (2 ** attempt)
-                logging.critical(f"Graph API timeout on attempt {attempt + 1}, retrying in {delay}s")
                 if attempt < max_retries - 1:
                     time.sleep(delay)
                     continue
                     
             except Exception as e:
-                logging.critical(f"Graph API error on attempt {attempt + 1}: {str(e)}")
                 if attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)
                     time.sleep(delay)
                     continue
         
-        logging.critical("Graph API failed after all retry attempts")
+        logging.warning("Graph API failed after all retry attempts")
         return []
 
     def auth_user_jwt(self, token):
@@ -411,75 +403,58 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         JWT authentication path - called when WordPress provides OBO token
         This creates the same user identity as OAuth authentication for session continuity
         """
-        logging.critical("========== AUTH_USER_JWT METHOD CALLED ==========")
-        logging.critical(f"Token first 10 chars: {token[:10] if token else 'None'}")
-        logging.critical(f"Request URL: {request.url if hasattr(request, 'url') else 'Unknown'}")
-        logging.critical(f"Request headers: {dict(request.headers) if hasattr(request, 'headers') else 'Unknown'}")
-       
         try:
             decoded_token = azure_token_validator.validate_token(token)
-            logging.critical(f"Token decoded successfully")
            
+            # Replay protection
             try:
                 jti = decoded_token.get('jti')
                 exp = decoded_token.get('exp')
                 if not jti or not exp:
-                    logging.critical("JWT missing jti or exp claims - replay protection not possible")
+                    logging.warning("JWT missing jti or exp claims - replay protection not possible")
                     return None
                     
                 if REPLAY_CACHE.get(jti):
-                    logging.critical(f"SECURITY VIOLATION: Replay detected for jti={jti}")
+                    logging.critical(f"SECURITY VIOLATION: JWT replay attack detected")
                     return None
                     
                 ttl = max(int(exp - datetime.datetime.now().timestamp()), 60)
                 REPLAY_CACHE.set(jti, 1, timeout=ttl)
-                logging.critical(f"JTI {jti} stored in replay cache with TTL {ttl}")
                 
             except Exception as replay_err:
-                logging.critical(f"SECURITY ERROR: Replay cache failure: {str(replay_err)}")
-                logging.critical("SECURITY: Redis unavailable - failing JWT validation for security")
+                logging.critical(f"SECURITY ERROR: Replay cache failure - denying authentication")
                 return None  
                 
-            # Map identity and basic profile from Azure AD OBO token
-            user_id = decoded_token.get(self.auth_user_jwt_username_key)  # upn
-            
-            # STEP 1: Try to get groups from JWT token first
+            # Extract user identity and groups
+            user_id = decoded_token.get(self.auth_user_jwt_username_key)
             azure_groups = decoded_token.get('groups', [])
-            logging.critical(f"User ID from token: {user_id}")
-            logging.critical(f"Groups from token: {len(azure_groups)}")
-            logging.critical(f"Available token fields: {list(decoded_token.keys())}")
             
-            # STEP 2: If no groups in token, try Graph API with OBO token
+            # If no groups in token, try Graph API
             if not azure_groups:
-                logging.critical("No groups in JWT token - attempting Graph API call with OBO token")
                 try:
-                    # Try to use the OBO token itself for Graph API
                     azure_groups = self._get_user_groups_from_graph(token)
-                    logging.critical(f"Retrieved {len(azure_groups)} groups from Graph API using OBO token")
-                except Exception as graph_error:
-                    logging.critical(f"Graph API call failed: {str(graph_error)}")
+                except Exception:
                     azure_groups = []
             
             if not user_id:
-                logging.critical("No user identifier found in JWT.")
+                logging.warning("No user identifier found in JWT token")
                 return None
                 
-            # STEP 3: Create user with Azure groups for role mapping
+            # Create user with Azure groups for role mapping
             return self._create_or_update_user(
                 user_id=user_id,
                 user_info={
                     'name': decoded_token.get('name') or user_id,
-                    'email': user_id,  # UPN serves as email address
+                    'email': user_id,
                     'given_name': decoded_token.get('given_name', ''),
                     'family_name': decoded_token.get('family_name', ''),
-                    'groups': azure_groups  # These will be mapped to Superset roles
+                    'groups': azure_groups
                 },
                 auth_source='jwt'
             )
             
         except Exception as e:
-            logging.critical(f"Error in auth_user_jwt: {str(e)}")
-            logging.critical(f"JWT auth traceback: {traceback.format_exc()}")
+            logging.error(f"JWT authentication failed: {str(e)}")
             return None
     
     def _create_or_update_user(self, user_id, user_info, auth_source):
@@ -487,23 +462,10 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         Unified user creation/update logic used by both OAuth and JWT authentication
         Ensures consistent user identity and role assignment regardless of auth path
         """
-        logging.critical(f"========== UNIFIED USER CREATION ({auth_source.upper()}) ==========")
-        logging.critical(f"User ID: {user_id}")
-        logging.critical(f"User info: {user_info}")
-        # Set replay protection context for JWT tokens
-        if auth_source == 'jwt':
-            # Note: Replay protection will be handled in the auth_user_jwt method
-            pass
-        
         user = self.find_user(username=user_id)
-        if user:
-            logging.critical(f"Existing user found: {user.username}")
-        else:
-            logging.critical(f"User '{user_id}' not found. Creating...")
+        if not user:
             user_name = user_info['name']
             email = user_info['email']
-            logging.critical(f"User details - Name: {user_name}, Email: {email}")
- 
             first_name = user_info.get('given_name') or ''
             last_name = user_info.get('family_name') or ''
             
@@ -511,10 +473,8 @@ class UnifiedSecurityManager(SupersetSecurityManager):
                 try:
                     first_name, last_name = user_name.split(" ", 1)
                 except (ValueError, AttributeError):
-                    first_name = user_id.split('@')[0]  # Use part before @ as fallback
+                    first_name = user_id.split('@')[0]
                     last_name = ""
-                    
-            logging.critical(f"User names - First: '{first_name}', Last: '{last_name}'")
                 
             try:
                 user = self.add_user(
@@ -525,29 +485,17 @@ class UnifiedSecurityManager(SupersetSecurityManager):
                     role=self.find_role('Public')
                 )
                 if user:
-                    logging.critical(f"User creation successful: {user.username}")
+                    logging.info(f"Created new user: {user.username}")
                 else:
-                    logging.critical(f"User creation returned None")
-            except Exception as user_create_error:
-                error_msg = str(user_create_error)
-                logging.critical(f"Error creating user: {error_msg}")
-                logging.critical(f"User creation traceback: {traceback.format_exc()}")
-
-                if 'already exists' in error_msg or 'duplicate key' in error_msg:
-                    logging.critical("User already exists in DB, retrying lookup...")
-                    user = self.find_user(username=user_id)
-                    if user:
-                        logging.critical(f"User re-fetched after duplicate insert: {user.username}")
-                    else:
-                        logging.critical("User still not found after duplicate error")
-                else:
+                    logging.error(f"User creation failed for {user_id}")
                     return None
+            except Exception as user_create_error:
+                logging.error(f"Error creating user {user_id}: {str(user_create_error)}")
+                return None
 
         if not user:
-            logging.critical("User is still None after attempted creation")
+            logging.error("User creation/lookup failed")
             return None
-               
-        logging.critical(f"User {user.username} confirmed - processing roles")
 
         superset_roles = []
 
@@ -561,14 +509,9 @@ class UnifiedSecurityManager(SupersetSecurityManager):
             mapping_group_col = os.getenv('AZURE_ROLE_MAPPING_GROUP_COL', 'GroupId')
             mapping_role_col = os.getenv('AZURE_ROLE_MAPPING_ROLE_COL', 'DisplayName')
             
-            logging.critical(f"========== AZURE GROUP MAPPING START ==========")
-            logging.critical(f"Processing {len(azure_groups)} Azure groups for role mapping")
-            logging.critical(f"Azure group GUIDs: {azure_groups}")
-            
             if mapping_db_uri and azure_groups:
                 from sqlalchemy import create_engine, text
                 engine = create_engine(mapping_db_uri, pool_pre_ping=True)
-                # Chunk guids to avoid parameter limits
                 chunk_size = int(os.getenv('AZURE_ROLE_MAPPING_CHUNK', '100'))
                 for i in range(0, len(azure_groups), chunk_size):
                     chunk = azure_groups[i:i+chunk_size]
@@ -581,23 +524,15 @@ class UnifiedSecurityManager(SupersetSecurityManager):
                         rows = conn.execute(sql, params).fetchall()
                         chunk_roles = [r.role_name for r in rows if r.role_name is not None]
                         resolved_role_names.extend(chunk_roles)
-                        logging.critical(f"Chunk {i//chunk_size + 1}: Mapped {len(chunk_roles)} roles: {chunk_roles}")
                         
-                        # Debug: Check for None values in database results
-                        none_count = sum(1 for r in rows if r.role_name is None)
-                        if none_count > 0:
-                            logging.critical(f"WARNING: Found {none_count} NULL role names in Azure SQL database!")
-                        
-                logging.critical(f"========== AZURE SQL MAPPING COMPLETE ==========")
-                logging.critical(f"Total resolved {len(resolved_role_names)} roles: {resolved_role_names}")
+                logging.info(f"Mapped {len(resolved_role_names)} Azure groups to roles")
                 
-            # If no DB mapping, default to using Azure group GUIDs verbatim as role names
+            # If no DB mapping, use Azure group GUIDs as role names
             if not resolved_role_names and azure_groups:
                 resolved_role_names = list(azure_groups)
-                logging.critical(f"Using Azure group GUIDs as role names: {len(resolved_role_names)}")
                 
         except Exception as map_err:
-            logging.critical(f"Azure SQL role mapping error: {str(map_err)}")
+            logging.error(f"Azure role mapping failed: {str(map_err)}")
 
         # Apply naming filters: keep roles that start with 'dashboard' or contain 'myportal' / 'beta myportal'
         try:
@@ -608,7 +543,6 @@ class UnifiedSecurityManager(SupersetSecurityManager):
                     filtered.append(rn)
             if filtered:
                 resolved_role_names = filtered
-                logging.critical(f"Filtered to {len(resolved_role_names)} roles after name filtering")
         except Exception as _:
             pass
 
@@ -616,75 +550,61 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         default_role_name = os.getenv('DEFAULT_PORTAL_ROLE', 'myportaluser')
         if default_role_name not in resolved_role_names:
             resolved_role_names.append(default_role_name)
-            
-        logging.critical(f"Final role list: {resolved_role_names}")
 
         # Create/attach roles
         for role_name in resolved_role_names:
             try:
-                # CRITICAL: Skip any None or empty role names
                 if not role_name or role_name.strip() == '':
-                    logging.critical(f"WARNING: Skipping invalid role name: {repr(role_name)}")
+                    logging.warning(f"Skipping invalid role name: {repr(role_name)}")
                     continue
                     
                 role = self.find_role(role_name)
                 if not role:
                     role = self.add_role(role_name)
-                    logging.critical(f"Created role: {role_name}")
                 superset_roles.append(role)
             except Exception as role_error:
-                logging.critical(f"Error ensuring role {role_name}: {str(role_error)}")
+                logging.error(f"Error ensuring role {role_name}: {str(role_error)}")
+        
         public_role = self.find_role('Public')
         if public_role and public_role not in superset_roles:
             superset_roles.append(public_role)
-            logging.critical("Added 'Public' role to ensure minimal permissions")
  
         try:
             user.roles = superset_roles
             self.update_user(user)  
-            logging.critical(f"User roles updated: {[r.name for r in user.roles]}")
+            logging.info(f"User {user.username} assigned {len(superset_roles)} roles")
         except Exception as role_update_error:
-            logging.critical(f"Error updating user roles: {str(role_update_error)}")
-            logging.critical(f"Role update traceback: {traceback.format_exc()}")
+            logging.error(f"Error updating user roles: {str(role_update_error)}")
+            return None
         
         try:
             from flask_login import login_user
-            login_user(user, remember=True)  # Remember for cross-domain session sharing
-            logging.critical(f"User logged in via flask_login.login_user(): {user.username}")
+            login_user(user, remember=True)
+            logging.info(f"User {user.username} authenticated successfully")
         except Exception as login_error:
-            logging.critical(f"Error in flask_login: {str(login_error)}")
-            logging.critical(f"Login error traceback: {traceback.format_exc()}")
+            logging.error(f"Flask login failed: {str(login_error)}")
         
-        logging.critical(f"Unified auth successful ({auth_source}) - returning user: {user.username}")
         return user
  
     def handle_invalid_token(self, error_string=None):
         """Handle JWT token errors more gracefully."""
-        logging.critical(f"Invalid JWT token: {error_string}")
+        logging.warning(f"Invalid JWT token: {error_string}")
         return None
     
     def unauthorized(self):
         from flask import redirect, url_for
         
-        logging.critical("========== UNAUTHORIZED ACCESS - REDIRECTING TO CUSTOM MICROSOFT OAUTH ==========")
-        logging.critical("UNAUTHORIZED METHOD CALLED - USING CUSTOM OAUTH ROUTE")
-        
         try:
             custom_oauth_url = url_for('microsoft_auth')
-            logging.critical(f"[CUSTOM OAUTH] Redirecting to: {custom_oauth_url}")
             return redirect(custom_oauth_url)
         except Exception as e:
-            logging.critical(f"Custom OAuth redirect failed: {str(e)}")
-            fallback_url = "/auth/microsoft"
-            logging.critical(f"[FALLBACK] Using direct path: {fallback_url}")
-            return redirect(fallback_url)
+            logging.warning(f"Custom OAuth redirect failed, using fallback: {str(e)}")
+            return redirect("/auth/microsoft")
 
     def login_url(self, next_url=None):
         """
-        CRITICAL: Always return Microsoft login URL - never return /login/
-        """
-        logging.critical("========== LOGIN_URL CALLED - REDIRECTING TO MICROSOFT ==========")
-        
+        Always return Microsoft login URL - never return /login/
+        """        
         tenant_id = AZURE_TENANT_ID
         client_id = AZURE_CLIENT_ID
         
@@ -700,7 +620,6 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         if next_url:
             microsoft_login_url += f"&state={next_url}"
             
-        logging.critical(f"[LOGIN URL] Returning Microsoft URL: {microsoft_login_url}")
         return microsoft_login_url
 
  
@@ -735,10 +654,7 @@ def current_username():
     import logging
     from flask import request, g
     
-    logging.critical("current_username called")
-    
     if hasattr(g, 'user') and g.user and hasattr(g.user, 'username'):
-        logging.critical(f"Found username in g.user: {g.user.username}")
         return g.user.username
     
     token = request.args.get('proof')
@@ -752,23 +668,17 @@ def current_username():
     if token:
         try:
             decoded = azure_token_validator.validate_token(token)
-            username = decoded.get(JWT_IDENTITY_CLAIM)  # Use 'upn' not 'username'
-            logging.critical(f"Found username in JWT: {username}")
-            return username
-        except Exception as e:
-            logging.critical(f"JWT decode error: {str(e)}")
+            return decoded.get(JWT_IDENTITY_CLAIM)
+        except Exception:
+            pass
     
-    logging.critical("Username not found, returning None")
     return None
  
 def current_user_id():
     import logging
     from flask import request, g
     
-    logging.critical("current_user_id called")
-    
     if hasattr(g, 'user') and g.user and hasattr(g.user, 'id'):
-        logging.critical(f"Found user_id in g.user: {g.user.id}")
         return g.user.id
     
     token = request.args.get('proof')
@@ -782,25 +692,17 @@ def current_user_id():
     if token:
         try:
             decoded = azure_token_validator.validate_token(token)
-            user_id = decoded.get('sub')
-            logging.critical(f"Found user_id in JWT: {user_id}")
-            return user_id
-        except Exception as e:
-            logging.critical(f"JWT decode error: {str(e)}")
+            return decoded.get('sub')
+        except Exception:
+            pass
     
-    logging.critical("User ID not found, returning None")
     return None
  
 def current_user_role():
-    import logging
     from flask import g
     
-    logging.critical("current_user_role called")
-    
     if hasattr(g, 'user') and g.user and hasattr(g.user, 'roles'):
-        roles = [r.name for r in g.user.roles]
-        logging.critical(f"Found roles in g.user: {roles}")
-        return roles
+        return [r.name for r in g.user.roles]
     
     return []
  
@@ -1292,15 +1194,11 @@ def flask_app_mutator(app):
         
         # Only intercept root and login paths for unauthenticated users
         if path in ['/', '/login', '/login/']:
-            logging.critical(f"========== INTERCEPTED REQUEST: {path} ==========")
-            
             # If user is already authenticated, let them continue
             if current_user and current_user.is_authenticated:
-                logging.critical(f"User already authenticated: {current_user} - allowing access")
                 return None  # Continue with normal request processing
             
             # User not authenticated - redirect to Microsoft OAuth
-            logging.critical("User not authenticated - redirecting to Microsoft OAuth")
             return redirect(url_for('microsoft_auth'))
         
         # For all other requests, continue normal processing
@@ -1314,8 +1212,6 @@ def flask_app_mutator(app):
         """
         import secrets
         from flask import session, redirect
-        
-        logging.critical("========== CUSTOM MICROSOFT OAUTH INITIATED ==========")
         
         # Generate state and nonce for security
         state = secrets.token_urlsafe(32)
@@ -1369,28 +1265,22 @@ def flask_app_mutator(app):
         import requests
         import traceback
         
-        logging.critical("========== MICROSOFT OAUTH AUTHENTICATION START ==========")
-        
         try:
             # Validate state parameter for security
             received_state = request.args.get('state')
             stored_state = session.get('oauth_state')
             
             if not received_state or not stored_state or received_state != stored_state:
-                logging.critical(f"ERROR: OAuth state mismatch: received={received_state}, stored={stored_state}")
+                logging.error(f"OAuth state mismatch - security violation")
                 return "Authentication failed: Invalid state parameter", 400
-            
-            logging.critical("STEP 1: OAuth state validation successful")
             
             # Get authorization code
             auth_code = request.args.get('code')
             if not auth_code:
                 error = request.args.get('error')
                 error_description = request.args.get('error_description')
-                logging.critical(f"ERROR: OAuth error: {error} - {error_description}")
+                logging.error(f"OAuth error: {error} - {error_description}")
                 return f"Authentication failed: {error_description or error}", 400
-            
-            logging.critical(f"STEP 2: Authorization code received, length: {len(auth_code)}")
             
             # Exchange code for access token
             token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
@@ -1402,54 +1292,46 @@ def flask_app_mutator(app):
                 'redirect_uri': 'https://stg-dashboards.rmcare.com/auth/callback'
             }
             
-            logging.critical("STEP 3: Exchanging authorization code for access token...")
             token_response = requests.post(token_url, data=token_data, timeout=10)
             if token_response.status_code != 200:
-                logging.critical(f"ERROR: Token exchange failed: {token_response.status_code} - {token_response.text}")
+                logging.error(f"Token exchange failed: {token_response.status_code}")
                 return "Authentication failed: Could not exchange code for token", 400
             
             token_info = token_response.json()
             access_token = token_info.get('access_token')
             
             if not access_token:
-                logging.critical("ERROR: No access token in response")
+                logging.error("No access token in response")
                 return "Authentication failed: No access token received", 400
-            
-            logging.critical(f"STEP 4: Access token received, length: {len(access_token)}")
             
             # Get user info from Microsoft Graph
             headers = {'Authorization': f'Bearer {access_token}'}
             
             # Get user profile
-            logging.critical("STEP 5: Fetching user profile from Microsoft Graph...")
             user_response = requests.get('https://graph.microsoft.com/v1.0/me', headers=headers, timeout=10)
             if user_response.status_code != 200:
-                logging.critical(f"ERROR: Failed to get user profile: {user_response.status_code}")
+                logging.error(f"Failed to get user profile: {user_response.status_code}")
                 return "Authentication failed: Could not retrieve user profile", 400
             
             user_data = user_response.json()
             user_id = user_data.get('userPrincipalName') or user_data.get('mail')
             display_name = user_data.get('displayName', user_id)
-            logging.critical(f"STEP 6: User profile retrieved - UPN: {user_id}, Name: {display_name}")
             
             # Get user groups
-            logging.critical("STEP 7: Fetching user groups from Microsoft Graph...")
             groups_response = requests.get('https://graph.microsoft.com/v1.0/me/memberOf', headers=headers, timeout=10)
             group_ids = []
             if groups_response.status_code == 200:
                 groups_data = groups_response.json()
                 group_ids = [group['id'] for group in groups_data.get('value', [])]
-                logging.critical(f"STEP 8: Retrieved {len(group_ids)} Azure group GUIDs from Microsoft Graph")
-                logging.critical(f"STEP 8a: Azure group GUIDs: {group_ids}")
+                logging.info(f"Retrieved {len(group_ids)} Azure group GUIDs")
             else:
-                logging.critical(f"ERROR: Failed to get groups: {groups_response.status_code}")
+                logging.warning(f"Failed to get groups: {groups_response.status_code}")
             
             if not user_id:
-                logging.critical("ERROR: No user identifier found in Microsoft response")
+                logging.error("No user identifier found in Microsoft response")
                 return "Authentication failed: No user identifier found", 400
             
-            # AZURE GROUP MAPPING START - Same logic as WordPress authentication
-            logging.critical("========== AZURE GROUP MAPPING START ==========")
+            # Azure group mapping
             resolved_role_names: list[str] = []
             try:
                 mapping_db_uri = os.getenv('AZURE_SQL_CONNECTION_STRING')
@@ -1500,14 +1382,10 @@ def flask_app_mutator(app):
                             logging.critical(f"STEP 11b: UPN fallback query returned {len(rows)} rows")
                             resolved_role_names.extend([r.role_name for r in rows if r.role_name])
             except Exception as map_err:
-                logging.critical(f"ERROR: Azure role mapping error: {str(map_err)}")
-                logging.critical(f"Mapping error traceback: {traceback.format_exc()}")
+                logging.error(f"Azure role mapping error: {str(map_err)}")
             
-            # ROLE FILTERING - Same logic as WordPress authentication
-            logging.critical("========== ROLE FILTERING START ==========")
+            # Role filtering
             default_role_name = os.getenv('DEFAULT_PORTAL_ROLE', 'myportaluser')
-            pre_filter_roles = resolved_role_names.copy()
-            logging.critical(f"STEP 14: Before filtering, have {len(pre_filter_roles)} roles: {pre_filter_roles}")
             
             # Apply naming filters: startwith 'dashboard' or contains 'myportal'/'beta myportal'
             try:
@@ -1543,14 +1421,12 @@ def flask_app_mutator(app):
                 'groups': group_ids  # Use same key as WordPress authentication
             }
             
-            # USER CREATION AND ROLE ASSIGNMENT
-            logging.critical("========== USER CREATION AND ROLE ASSIGNMENT START ==========")
+            # User creation and role assignment
             security_manager = app.appbuilder.sm
             user = security_manager._create_or_update_user(user_id, user_info, 'microsoft_oauth')
             
             if user:
-                logging.critical(f"STEP 19: Microsoft OAuth authentication successful for {user_id}")
-                logging.critical(f"STEP 19a: Final user roles: {[r.name for r in user.roles] if user and user.roles else 'None'}")
+                logging.info(f"Microsoft OAuth authentication successful for {user_id}")
                 
                 # Log the user in using Flask-Login
                 from flask_login import login_user
@@ -1564,18 +1440,14 @@ def flask_app_mutator(app):
                 session.pop('oauth_state', None)
                 session.pop('oauth_nonce', None)
                 
-                logging.critical("========== MICROSOFT OAUTH AUTHENTICATION COMPLETE ==========")
-                logging.critical(f"FINAL RESULT - User: {user_id}, Roles: {[r.name for r in user.roles] if user and user.roles else []}")
-                
                 # Redirect to Superset dashboard
                 return redirect('/')
             else:
-                logging.critical(f"ERROR: Failed to create/update user for {user_id}")
+                logging.error(f"Failed to create/update user for {user_id}")
                 return "Authentication failed: Could not create user account", 500
                 
         except Exception as e:
-            logging.critical(f"ERROR: Microsoft OAuth callback error: {str(e)}")
-            logging.critical(f"OAuth callback traceback: {traceback.format_exc()}")
+            logging.error(f"Microsoft OAuth callback error: {str(e)}")
             return "Authentication failed: Internal error", 500
  
     return app
@@ -1587,14 +1459,6 @@ RECAPTCHA_PUBLIC_KEY = ""
 def log_all_requests(app):
     @app.before_request
     def before_request():
-        logging.critical(f"BEFORE_REQUEST FIRED: {request.path}")
-        logging.critical(f"Method: {request.method}")
-        logging.critical(f"Headers: {dict(request.headers)}")
-        logging.critical(f"Query params: {dict(request.args)}")
-        if request.path.startswith('/superset/') or 'proof=' in request.query_string.decode():
-            logging.critical("*** WORDPRESS JWT REQUEST DETECTED ***")
-            logging.critical(f"Full URL: {request.url}")
-        
         # Security check: Block direct dashboard access for unauthenticated users
         # Allow WordPress iframe embedding with ?standalone=1
         if request.path.startswith('/superset/dashboard/'):
@@ -1611,7 +1475,7 @@ def log_all_requests(app):
                     
                     # If user only has public role, they need to authenticate for direct access
                     if len(user_roles) == 1 and public_role_name in user_roles:
-                        logging.critical(f"BLOCKING DIRECT ACCESS: User only has public role {public_role_name}")
+                        logging.info(f"Blocking direct dashboard access - user has only public role")
                         return redirect('/auth/microsoft')
     
     return app
