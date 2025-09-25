@@ -1312,6 +1312,17 @@ def flask_app_mutator(app):
 FLASK_APP_MUTATOR = flask_app_mutator
 RECAPTCHA_PUBLIC_KEY = ""
 
+def validate_wordpress_origin():
+    """
+    Validate that standalone requests come from authorized WordPress domains
+    """
+    referer = request.headers.get('Referer', '')
+    allowed_wordpress_domains = [
+        'https://beta.myportal.rmcare.com',  # Staging WordPress
+        'https://myportal.rmcare.com'        # Production WordPress (future)
+    ]
+    return any(domain in referer for domain in allowed_wordpress_domains)
+
 # Global request logging to debug WordPress-to-Superset connectivity
 def log_all_requests(app):
     @app.before_request
@@ -1332,8 +1343,13 @@ def log_all_requests(app):
                     
                     # If user only has public role, they need to authenticate for direct access
                     if len(user_roles) == 1 and public_role_name in user_roles:
-                        logging.info(f"Blocking direct dashboard access - user has only public role")
+                        logging.info("Blocking direct dashboard access - user has only public role")
                         return redirect('/auth/microsoft')
+            else:
+                # STANDALONE mode - validate WordPress origin
+                if not validate_wordpress_origin():
+                    logging.warning(f"Unauthorized standalone access attempt from: {request.headers.get('Referer', 'No-Referer')}")
+                    return redirect('/auth/microsoft')
     
     return app
 
