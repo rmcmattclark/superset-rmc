@@ -288,7 +288,7 @@ class AzureADTokenValidator:
     
     def validate_token(self, token):
         """Validate Azure AD OBO token and return claims"""
-        logging.critical(f"[JWT Debug] validate_token called with token length: {len(token) if token else 0}")
+        logging.debug("Token validation initiated")
         try:
             # Decode header to get key ID
             unverified_header = jwt.get_unverified_header(token)
@@ -804,7 +804,7 @@ def flask_app_mutator(app):
     @app.before_request
     def process_jwt_for_every_request():
         path = request.path
-        logging.critical(f"BEFORE_REQUEST FIRED: {path}")
+        logging.debug("Request intercepted for JWT processing")
        
         if path.startswith('/static/') or path.startswith('/healthz'):
             return None
@@ -817,14 +817,14 @@ def flask_app_mutator(app):
                 token = auth_header[7:]
        
         if token:
-            logging.critical(f"TOKEN FOUND IN REQUEST: {path}")
+            logging.info("JWT token detected in request")
            
             try:
                 decoded = azure_token_validator.validate_token(token)
                 username = decoded.get(JWT_IDENTITY_CLAIM)  # Use 'upn' not 'username'
                
                 if username:
-                    logging.critical(f"TOKEN USERNAME: {username}")
+                    logging.info("User authenticated via JWT token")
                    
                     try:
                         from flask_appbuilder.security.sqla.models import User
@@ -832,16 +832,16 @@ def flask_app_mutator(app):
                         existing_user = db.query(User).filter_by(username=username).first()
                        
                         if existing_user:
-                            logging.critical(f"USER EXISTS IN DB: {username}")
+                            logging.info("Existing user found in database")
                         else:
-                            logging.critical(f"USER DOES NOT EXIST IN DB, CREATING: {username}")
+                            logging.info("Creating new user account")
                     except ImportError as e:
-                        logging.critical(f"Import error: {str(e)}")
+                        logging.warning(f"Import error: {str(e)}")
                         existing_user = app.appbuilder.sm.find_user(username=username)
                         if existing_user:
-                            logging.critical(f"USER EXISTS (via SM): {username}")
+                            logging.info("Existing user found via security manager")
                         else:
-                            logging.critical(f"USER DOES NOT EXIST (via SM): {username}")
+                            logging.info("User does not exist, will create")
                        
                         user_name = decoded.get('user_name', '')
                         email = decoded.get('email', username)
@@ -857,7 +857,7 @@ def flask_app_mutator(app):
                                 role = sm.find_role(role_name)
                                 if not role:
                                     role = sm.add_role(role_name)
-                                    logging.critical(f"Created role: {role_name}")
+                                    logging.info("New role created")
                                 role_objects.append(role)
                            
                             public_role = sm.find_role('myportaluser')
@@ -875,35 +875,35 @@ def flask_app_mutator(app):
                                     role=role_objects[0] if role_objects else None # First role is primary
                                 )
  
-                                logging.critical(f"Created user: {username}")
+                                logging.info("New user account created")
                                 # Add additional roles
                                 for role in role_objects[1:]:
                                     sm.add_user_role(new_user, role)
                             else:
-                                logging.critical(f"User already exists: {username}")
+                                logging.info("User account already exists")
                                 # Update user roles. Important for role changes in the JWT.
                                 user.roles = role_objects
-                                logging.critical(f"Updated roles for user: {username} with {len(role_objects)} roles")
+                                logging.info(f"User roles updated with {len(role_objects)} roles")
  
                            # *** CRITICAL: Set the user in the Flask login context ***
                             sm.set_flask_login_user(new_user)
-                            logging.critical(f"Auto-logged in new user: {username}")
+                            logging.info("User logged in successfully")
                            
                         except Exception as user_create_error:
-                            logging.critical(f"Error creating user: {str(user_create_error)}")
-                            logging.critical(traceback.format_exc())
+                            logging.error(f"Error creating user: {str(user_create_error)}")
+                            logging.debug(traceback.format_exc())
                    
                     if not g.get('user') or not g.get('user').is_authenticated:
                         try:
                             user = app.appbuilder.sm.auth_user_jwt(token)
                             if user:
-                                logging.critical(f"USER AUTHENTICATED: {user.username}")
+                                logging.info("User authenticated successfully")
                         except Exception as auth_error:
-                            logging.critical(f"AUTH ERROR: {str(auth_error)}")
+                            logging.error(f"Authentication error: {str(auth_error)}")
                
             except Exception as e:
-                logging.critical(f"JWT PROCESSING ERROR: {str(e)}")
-                logging.critical(traceback.format_exc())
+                logging.error(f"JWT processing error: {str(e)}")
+                logging.debug(traceback.format_exc())
 
     @app.route('/api/rmc/sso/init', methods=['POST'])
     def rmc_sso_init():
@@ -923,7 +923,7 @@ def flask_app_mutator(app):
             try:
                 payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
             except Exception as e:
-                logging.critical(f"Payload decode error before signature check: {str(e)}")
+                logging.error(f"Payload decode error: {str(e)}")
                 return (json.dumps({'error': 'bad payload encoding'}), 400, {'Content-Type': 'application/json'})
 
             computed = hmac.new(shared.encode('utf-8'), payload_json.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -948,7 +948,7 @@ def flask_app_mutator(app):
                         name = extra.get('name', name)
                         email = extra.get('email', email)
                 except Exception as ex_err:
-                    logging.critical(f"WP exchange error: {str(ex_err)}")
+                    logging.warning(f"WP exchange error: {str(ex_err)}")
 
             resolved_role_names: list[str] = []
             try:
@@ -982,7 +982,7 @@ def flask_app_mutator(app):
                             rows = conn.execute(sql, {'upn': upn}).fetchall()
                             resolved_role_names.extend([r.role_name for r in rows if r.role_name])
             except Exception as map_err:
-                logging.critical(f"UPN role mapping error: {str(map_err)}")
+                logging.error(f"UPN role mapping error: {str(map_err)}")
 
             default_role_name = os.getenv('DEFAULT_PORTAL_ROLE', 'myportaluser')
             if default_role_name not in resolved_role_names:
@@ -1011,7 +1011,7 @@ def flask_app_mutator(app):
                     role = sm.find_role(rn)
                     if not role:
                         role = sm.add_role(rn)
-                        logging.critical(f"Created role: {rn}")
+                        logging.info("New role created")
                     role_objects.append(role)
                 if not user:
                     user = sm.add_user(
@@ -1029,155 +1029,12 @@ def flask_app_mutator(app):
                 login_user(user)
                 return (json.dumps({'status': 'ok', 'user': upn, 'roles': [r.name for r in user.roles]}), 200, {'Content-Type': 'application/json'})
             except Exception as user_err:
-                logging.critical(f"User setup error: {str(user_err)}")
+                logging.error(f"User setup error: {str(user_err)}")
                 return (json.dumps({'error': 'user setup failed'}), 500, {'Content-Type': 'application/json'})
         except Exception as e:
-            logging.critical(f"SSO init error: {str(e)}")
+            logging.error(f"SSO init error: {str(e)}")
             return (json.dumps({'error': 'server error'}), 500, {'Content-Type': 'application/json'})
 
-    @app.route('/debug-jwt')
-    def debug_jwt():
-        token = request.args.get('proof')
-        result = {"received_token": False}
-        if token:
-            result["received_token"] = True
-            result["token_length"] = len(token)
-            try:
-                decoded = azure_token_validator.validate_token(token)
-                result["payload"] = decoded
-                current_timestamp = datetime.datetime.now().timestamp()
-                if 'exp' in decoded:
-                    exp_timestamp = decoded['exp']
-                    result["token_expiration"] = {
-                        "expires_at": exp_timestamp,
-                        "current_time": current_timestamp,
-                        "seconds_until_expiry": exp_timestamp - current_timestamp,
-                        "is_expired": exp_timestamp <= current_timestamp
-                    }
-                configured_claim_present = JWT_IDENTITY_CLAIM in decoded
-                result["token_identity"] = {
-                    "has_username": "username" in decoded,
-                    "has_sub": "sub" in decoded,
-                    "configured_identity_claim": JWT_IDENTITY_CLAIM,
-                    "configured_claim_present": configured_claim_present,
-                    "identity_value": decoded.get(JWT_IDENTITY_CLAIM)
-                }
-                if not configured_claim_present:
-                    result["identity_warning"] = f"The configured identity claim '{JWT_IDENTITY_CLAIM}' is missing from token!"
-                    alternative_claims = []
-                    if "username" in decoded and JWT_IDENTITY_CLAIM != "username":
-                        alternative_claims.append("username")
-                    if "sub" in decoded and JWT_IDENTITY_CLAIM != "sub":
-                        alternative_claims.append("sub")
-                    if alternative_claims:
-                        result["identity_suggestion"] = f"Consider changing JWT_IDENTITY_CLAIM to one of these available claims: {alternative_claims}"
-                logging.info(f"Successfully decoded token with payload: {json.dumps(decoded)}")
-            except Exception as e:
-                result["decode_error"] = str(e)
-                logging.error(f"Error decoding token: {str(e)}")
-        return json.dumps(result, indent=2)
- 
-    @app.route('/jwt-debug-status')
-    def jwt_debug_status():
-        result = {
-            "before_request_registered": True,
-            "app_name": app.name,
-            "auth_type": app.config.get('AUTH_TYPE'),
-            "jwt_settings": {
-                "token_location": app.config.get('JWT_TOKEN_LOCATION'),
-                "query_string_name": app.config.get('JWT_QUERY_STRING_NAME'),
-                "identity_claim": app.config.get('JWT_IDENTITY_CLAIM')
-            },
-            "custom_sm_active": isinstance(app.appbuilder.sm, CustomSecurityManager),
-            "username_key": app.appbuilder.sm.auth_user_jwt_username_key if hasattr(app.appbuilder.sm, 'auth_user_jwt_username_key') else None,
-        }
-       
-        test_token = request.args.get('proof')
-        if test_token:
-            try:
-                decoded = azure_token_validator.validate_token(test_token)
-                result["token_test"] = {
-                    "decoded": True,
-                    "username": decoded.get('username'),
-                    "roles": decoded.get('roles')
-                }
-               
-                try:
-                    auth_result = app.appbuilder.sm.auth_user_jwt(test_token)
-                    result["auth_test"] = {
-                        "success": auth_result is not None,
-                        "username": auth_result.username if auth_result else None
-                    }
-                except Exception as auth_e:
-                    result["auth_test"] = {
-                        "success": False,
-                        "error": str(auth_e)
-                    }
-            except Exception as e:
-                result["token_test"] = {
-                    "decoded": False,
-                    "error": str(e)
-                }
-       
-        return json.dumps(result, indent=2)
- 
-    @app.route('/check-roles')
-    def check_roles():
-        if not g.user or not g.user.is_authenticated:
-            return json.dumps({"error": "Not authenticated", "status": "Please login with JWT token"})
-       
-        try:
-            roles = [r.name for r in g.user.roles]
-            permissions = list(g.user.permissions)
-           
-            return json.dumps({
-                "username": g.user.username,
-                "full_name": f"{g.user.first_name} {g.user.last_name}",
-                "email": g.user.email,
-                "roles": roles,
-                "is_admin": g.user.is_admin(),
-                "permissions": permissions
-            }, indent=2)
-        except Exception as e:
-            return json.dumps({
-                "error": "Error getting user details",
-                "message": str(e),
-                "traceback": traceback.format_exc()
-            }, indent=2)
-
-    @app.route('/test-template-functions')
-    def test_template_functions():
-        from superset import jinja_context
-        import inspect
-        import json
-        
-        result = {
-            "available_functions": [],
-            "test_results": {}
-        }
-        
-        for name, func in inspect.getmembers(jinja_context, inspect.isfunction):
-            result["available_functions"].append(name)
-        
-        if hasattr(jinja_context, 'current_username'):
-            try:
-                result["test_results"]["current_username"] = jinja_context.current_username()
-            except Exception as e:
-                result["test_results"]["current_username_error"] = str(e)
-        else:
-            result["test_results"]["current_username_error"] = "Function not found in jinja_context"
-            
-        if hasattr(jinja_context, 'current_user_id'):
-            try:
-                result["test_results"]["current_user_id"] = jinja_context.current_user_id()
-            except Exception as e:
-                result["test_results"]["current_user_id_error"] = str(e)
-        else:
-            result["test_results"]["current_user_id_error"] = "Function not found in jinja_context"
-        
-        result["jinja_context_addons"] = {k: str(v) for k, v in app.config.get('JINJA_CONTEXT_ADDONS', {}).items()}
-        
-        return json.dumps(result, indent=2)
 
     # Global request interceptor - handles ALL requests before route processing
     @app.before_request
@@ -1237,7 +1094,7 @@ def flask_app_mutator(app):
             f"&response_mode=query"
         )
         
-        logging.critical(f"[CUSTOM OAUTH] Redirecting to Microsoft: {microsoft_url}")
+        logging.info("Initiating Microsoft OAuth flow")
         
         # Use JavaScript redirect to bypass reverse proxy URL interception
         return f'''
@@ -1336,9 +1193,9 @@ def flask_app_mutator(app):
             try:
                 mapping_db_uri = os.getenv('AZURE_SQL_CONNECTION_STRING')
                 if not mapping_db_uri:
-                    logging.critical("WARNING: No AZURE_SQL_CONNECTION_STRING found, skipping group mapping")
+                    logging.warning("No AZURE_SQL_CONNECTION_STRING found, skipping group mapping")
                 else:
-                    logging.critical(f"STEP 9: Azure SQL connection string found, length: {len(mapping_db_uri)}")
+                    logging.info("Azure SQL connection configured for group mapping")
                     from sqlalchemy import create_engine, text
                     engine = create_engine(mapping_db_uri, pool_pre_ping=True)
                     
@@ -1347,28 +1204,28 @@ def flask_app_mutator(app):
                         group_table = os.getenv('AZURE_ROLE_MAPPING_TABLE', 'dbo.ActiveEntraGroups')
                         group_id_col = os.getenv('AZURE_ROLE_MAPPING_GROUP_COL', 'GroupId')
                         group_name_col = os.getenv('AZURE_ROLE_MAPPING_ROLE_COL', 'DisplayName')
-                        logging.critical(f"STEP 10: Using Azure SQL table: {group_table}, Group ID column: {group_id_col}, Name column: {group_name_col}")
+                        logging.info("Executing Azure AD group to role mapping")
                         
                         placeholders = ','.join([f":g{j}" for j in range(len(group_ids))])
                         sql = text(
                             f"SELECT {group_name_col} AS role_name FROM {group_table} WHERE {group_id_col} IN ({placeholders})"
                         )
                         params = {f"g{j}": group_ids[j] for j in range(len(group_ids))}
-                        logging.critical(f"STEP 11: Executing SQL query with {len(params)} parameters")
+                        logging.debug(f"Executing group mapping query with {len(params)} groups")
                         
                         with engine.connect() as conn:
                             rows = conn.execute(sql, params).fetchall()
-                            logging.critical(f"STEP 12: Azure SQL query returned {len(rows)} rows")
+                            logging.info(f"Azure SQL query returned {len(rows)} role mappings")
                             for i, row in enumerate(rows):
-                                logging.critical(f"STEP 12a: Row {i+1}: role_name = '{row.role_name}'")
+                                logging.debug(f"Mapped role: {row.role_name}")
                             resolved_role_names.extend([r.role_name for r in rows if r.role_name])
                             none_count = sum(1 for r in rows if r.role_name is None)
                             if none_count > 0:
-                                logging.critical(f"WARNING: Found {none_count} NULL role names in Azure SQL results")
+                                logging.warning(f"Found {none_count} NULL role names in mapping results")
                         
-                        logging.critical(f"STEP 13: After Azure SQL mapping, resolved {len(resolved_role_names)} role names: {resolved_role_names}")
+                        logging.info(f"Resolved {len(resolved_role_names)} roles from Azure AD groups")
                     else:
-                        logging.critical("STEP 10b: No Azure group GUIDs found, falling back to UPN-based mapping")
+                        logging.info("No Azure group GUIDs found, using UPN-based mapping fallback")
                         # Fallback to UPN→role mapping view
                         upn_table = os.getenv('AZURE_UPN_ROLE_VIEW', 'UserGroupMembershipView')
                         upn_col = os.getenv('AZURE_ROLE_MAPPING_UPN_COL', 'upn')
@@ -1379,7 +1236,7 @@ def flask_app_mutator(app):
                         )
                         with engine.connect() as conn:
                             rows = conn.execute(sql, {'upn': user_id}).fetchall()
-                            logging.critical(f"STEP 11b: UPN fallback query returned {len(rows)} rows")
+                            logging.info(f"UPN fallback mapping returned {len(rows)} roles")
                             resolved_role_names.extend([r.role_name for r in rows if r.role_name])
             except Exception as map_err:
                 logging.error(f"Azure role mapping error: {str(map_err)}")
@@ -1394,23 +1251,23 @@ def flask_app_mutator(app):
                     lower = (rn or '').lower()
                     if lower.startswith('dashboard') or ('myportal' in lower) or ('beta myportal' in lower):
                         filtered.append(rn)
-                        logging.critical(f"STEP 15a: Role '{rn}' passed filter (matches dashboard/myportal criteria)")
+                        logging.debug(f"Role '{rn}' passed filter criteria")
                     else:
-                        logging.critical(f"STEP 15b: Role '{rn}' FILTERED OUT (does not match dashboard/myportal criteria)")
+                        logging.debug(f"Role '{rn}' filtered out (does not match criteria)")
                 
                 if filtered:
                     resolved_role_names = filtered
-                    logging.critical(f"STEP 16: After filtering, kept {len(resolved_role_names)} roles: {resolved_role_names}")
+                    logging.info(f"After filtering, assigned {len(resolved_role_names)} roles to user")
                 else:
-                    logging.critical("STEP 16: No roles passed filter, keeping original list")
+                    logging.info("No roles passed filter, keeping original role list")
             except Exception as filter_err:
-                logging.critical(f"ERROR: Role filtering error: {str(filter_err)}")
+                logging.error(f"Role filtering error: {str(filter_err)}")
             
             if default_role_name not in resolved_role_names:
                 resolved_role_names.append(default_role_name)
-                logging.critical(f"STEP 17: Added default role '{default_role_name}' to role list")
+                logging.info(f"Added default role '{default_role_name}' to user")
             
-            logging.critical(f"STEP 18: FINAL ROLE LIST for user {user_id}: {resolved_role_names}")
+            logging.info(f"User assigned {len(resolved_role_names)} total roles")
             
             # Prepare user info in same format as JWT authentication
             user_info = {
