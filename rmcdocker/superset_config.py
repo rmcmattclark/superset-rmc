@@ -10,6 +10,8 @@ import hmac
 import hashlib
 import base64
 import requests
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # redis and celery
 import os
@@ -801,6 +803,15 @@ def flask_app_mutator(app):
     except Exception as e:
         logging.exception(f"Error creating roles: {e}")
        
+    # Configure rate limiting for authentication endpoints
+    limiter = Limiter(
+        app=app,
+        key_func=get_remote_address,
+        default_limits=["2000 per hour"],  # Global fallback limit
+        headers_enabled=True,  # Show rate limit info in response headers
+        storage_uri=f"redis://{REDIS_HOST}:{REDIS_PORT}/4"  # Use Redis for distributed rate limiting
+    )
+       
     @app.before_request
     def process_jwt_for_every_request():
         path = request.path
@@ -906,6 +917,7 @@ def flask_app_mutator(app):
                 logging.debug(traceback.format_exc())
 
     @app.route('/api/rmc/sso/init', methods=['POST'])
+    @limiter.limit("200 per minute")  # WordPress auth endpoint - doubled limit for 1000 users
     def rmc_sso_init():
         try:
             data = request.get_json(silent=True) or {}
@@ -1062,6 +1074,7 @@ def flask_app_mutator(app):
         return None
     
     @app.route('/auth/microsoft')
+    @limiter.limit("100 per minute")  # OAuth initiation - doubled limit for 1000 users
     def microsoft_auth():
         """
         Custom Microsoft OAuth initiation - bypasses Flask-AppBuilder OAuth system
@@ -1113,6 +1126,7 @@ def flask_app_mutator(app):
         '''
     
     @app.route('/auth/callback')
+    @limiter.limit("120 per minute")  # OAuth callback - doubled limit for 1000 users
     def microsoft_callback():
         """
         Custom Microsoft OAuth callback - handles the response from Microsoft
