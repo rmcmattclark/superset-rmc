@@ -1076,8 +1076,8 @@ def flask_app_mutator(app):
             except AttributeError:
                 # Stale session - user lookup failed
                 logging.warning("Stale user session detected, forcing reauthentication")
-                from flask_login import logout_user
-                logout_user()  # Clear invalid session
+                from flask import session
+                session.clear()  # Clear invalid session without triggering Flask-Login
                 user_authenticated = False
             
             if user_authenticated:
