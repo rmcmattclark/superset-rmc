@@ -1071,7 +1071,16 @@ def flask_app_mutator(app):
         # Only intercept root and login paths for unauthenticated users
         if path in ['/', '/login', '/login/']:
             # If user is already authenticated, let them continue
-            if current_user and current_user.is_authenticated:
+            try:
+                user_authenticated = current_user and current_user.is_authenticated
+            except AttributeError:
+                # Stale session - user lookup failed
+                logging.warning("Stale user session detected, forcing reauthentication")
+                from flask_login import logout_user
+                logout_user()  # Clear invalid session
+                user_authenticated = False
+            
+            if user_authenticated:
                 return None  # Continue with normal request processing
             
             # User not authenticated - redirect to Microsoft OAuth
