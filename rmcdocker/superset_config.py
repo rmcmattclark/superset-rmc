@@ -536,12 +536,12 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         except Exception as map_err:
             logging.error(f"Azure role mapping failed: {str(map_err)}")
 
-        # Apply naming filters: keep roles that start with 'dashboard' or contain 'myportal' / 'beta myportal'
+        # Apply naming filters: keep roles that start with 'dashboard' or contain 'myportal' / 'beta myportal' / 'administrator'
         try:
             filtered: list[str] = []
             for rn in resolved_role_names:
                 lower = (rn or '').lower()
-                if lower.startswith('dashboard') or ('myportal' in lower) or ('beta myportal' in lower):
+                if lower.startswith('dashboard') or ('myportal' in lower) or ('beta myportal' in lower) or ('administrator' in lower):
                     filtered.append(rn)
             if filtered:
                 resolved_role_names = filtered
@@ -552,6 +552,13 @@ class UnifiedSecurityManager(SupersetSecurityManager):
         default_role_name = os.getenv('DEFAULT_PORTAL_ROLE', 'myportaluser')
         if default_role_name not in resolved_role_names:
             resolved_role_names.append(default_role_name)
+
+        # Special handling for Dashboard - Administrator role
+        if "Dashboard - Administrator" in resolved_role_names:
+            # Replace Dashboard - Administrator with built-in Admin role
+            resolved_role_names.remove("Dashboard - Administrator")
+            resolved_role_names.append("Admin")
+            logging.info(f"Mapped Dashboard - Administrator to Superset Admin role for user {user_id}")
 
         # Create/attach roles
         for role_name in resolved_role_names:
@@ -790,7 +797,7 @@ EXTRA_SEQUENTIAL_COLOR_SCHEMES = [
 def flask_app_mutator(app):
     try:
         security_manager = app.appbuilder.sm
-        roles_to_create = ["myportaluser"]  # Only create default role - Azure groups handle the rest
+        roles_to_create = ["myportaluser", "Admin"]  # Create default role and Admin role for Dashboard - Administrator
        
         for role_name in roles_to_create:
             if not security_manager.find_role(role_name):
