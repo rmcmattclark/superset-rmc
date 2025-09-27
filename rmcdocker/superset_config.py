@@ -136,8 +136,14 @@ WTF_CSRF_CHECK_DEFAULT = False  # Disable CSRF checking by default
 CSRF_ENABLED = False  # Legacy CSRF setting
 
 # Azure AD Configuration for OBO Token Validation
-AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "9b461294-9d11-4314-928e-277398086f19")
-AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "39ad4e02-9a76-4464-810b-eac74dbc0950")
+AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID")
+AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID")
+AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
+
+if not AZURE_TENANT_ID or not AZURE_CLIENT_ID or not AZURE_CLIENT_SECRET:
+    raise RuntimeError("AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET environment variables must be set")
+
+SUPERSET_BASE_URL = os.getenv("SUPERSET_BASE_URL", "https://stg-dashboards.rmcare.com")
 AZURE_AD_CONFIG = {
     "tenant_id": AZURE_TENANT_ID,
     "client_id": AZURE_CLIENT_ID,
@@ -621,7 +627,7 @@ class UnifiedSecurityManager(SupersetSecurityManager):
             f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
             f"?client_id={client_id}"
             f"&response_type=code"
-            f"&redirect_uri=https://stg-dashboards.rmcare.com/"
+            f"&redirect_uri={SUPERSET_BASE_URL}/"
             f"&scope=openid%20email%20profile%20User.Read"
             f"&response_mode=query"
         )
@@ -729,17 +735,17 @@ DASHBOARD_HORIZONTAL_FILTER_BAR_DEFAULT = True
 # MyPortal Configuration
 TALISMAN_CONFIG = {
     'content_security_policy': {
-        'frame-ancestors': ["'self'", "https://beta.myportal.rmcare.com", "https://myportal.rmcare.com", "https://stg-dashboards.rmcare.com"],
+        'frame-ancestors': ["'self'", "https://beta.myportal.rmcare.com", "https://myportal.rmcare.com", SUPERSET_BASE_URL],
     },
     'force_https': False,
-    'session_cookie_secure': False,
+    'session_cookie_secure': True,
 }
 ENABLE_CORS = True
 CORS_OPTIONS = {
   'supports_credentials': True,
   'allow_headers': ['Content-Type', 'Authorization', 'X-Requested-With'],
   'expose_headers': ['Set-Cookie'],
-  'resources': {'*': {'origins': ['https://beta.myportal.rmcare.com', 'https://myportal.rmcare.com', 'https://stg-dashboards.rmcare.com']}},
+  'resources': {'*': {'origins': ['https://beta.myportal.rmcare.com', 'https://myportal.rmcare.com', SUPERSET_BASE_URL]}},
 }
 
 # Session Configuration for Cross-Domain Support
@@ -1105,7 +1111,7 @@ def flask_app_mutator(app):
         # Build Microsoft OAuth URL with correct parameters
         tenant_id = AZURE_TENANT_ID
         client_id = AZURE_CLIENT_ID
-        redirect_uri = "https://stg-dashboards.rmcare.com/auth/callback"
+        redirect_uri = f"{SUPERSET_BASE_URL}/auth/callback"
         
         microsoft_url = (
             f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
@@ -1168,10 +1174,10 @@ def flask_app_mutator(app):
             token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
             token_data = {
                 'client_id': AZURE_CLIENT_ID,
-                'client_secret': os.getenv('AZURE_CLIENT_SECRET', 'y1p8Q~fG~hGudO7N6s56Wj~82j0c56P5wfsnJb2a'),
+                'client_secret': AZURE_CLIENT_SECRET,
                 'code': auth_code,
                 'grant_type': 'authorization_code',
-                'redirect_uri': 'https://stg-dashboards.rmcare.com/auth/callback'
+                'redirect_uri': f'{SUPERSET_BASE_URL}/auth/callback'
             }
             
             token_response = requests.post(token_url, data=token_data, timeout=10)
