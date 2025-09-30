@@ -17,17 +17,18 @@ from flask_limiter.util import get_remote_address
 import os
 from cachelib.redis import RedisCache
  
-# Setup logging
+# Setup logging - INFO level in production to prevent token/credential leakage
+log_level = logging.DEBUG if os.getenv('SUPERSET_ENV') == 'development' else logging.INFO
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logging.getLogger('flask_jwt_extended').setLevel(logging.DEBUG)
-logging.getLogger('jwt').setLevel(logging.DEBUG)
-logging.getLogger('superset').setLevel(logging.DEBUG)
-logging.getLogger('werkzeug').setLevel(logging.DEBUG)
+logging.getLogger('flask_jwt_extended').setLevel(log_level)
+logging.getLogger('jwt').setLevel(log_level)
+logging.getLogger('superset').setLevel(log_level)
+logging.getLogger('werkzeug').setLevel(log_level)
 jwt_logger = logging.getLogger('superset.jwt')
-jwt_logger.setLevel(logging.DEBUG)
+jwt_logger.setLevel(log_level)
  
 SECRET_KEY = os.getenv("SUPERSET_SECRET_KEY")
 SQLALCHEMY_DATABASE_URI = os.getenv("SUPERSET_DB_URI")
@@ -749,10 +750,12 @@ CORS_OPTIONS = {
 }
 
 # Session Configuration for Cross-Domain Support
+# Main container (port 8089) uses HTTPS via reverse proxy (stg-dashboards.rmcare.com)
+# Admin container (port 8090) uses separate config with HTTP localhost access
 SESSION_COOKIE_DOMAIN = '.rmcare.com'  # Shared across WordPress and Superset
-SESSION_COOKIE_SECURE = True  # HTTPS only in production
-SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = 'None'  # Required for iframe embedding
+SESSION_COOKIE_SECURE = True  # HTTPS only - main container behind reverse proxy
+SESSION_COOKIE_HTTPONLY = True  # Prevent JavaScript access to cookies
+SESSION_COOKIE_SAMESITE = 'None'  # Required for iframe embedding from WordPress
 SESSION_PERMANENT = False
 PERMANENT_SESSION_LIFETIME = 3600  # 1 hour session timeout
  
@@ -861,62 +864,8 @@ def flask_app_mutator(app):
                             logging.info("Creating new user account")
                     except ImportError as e:
                         logging.warning(f"Import error: {str(e)}")
-                        existing_user = app.appbuilder.sm.find_user(username=username)
-                        if existing_user:
-                            logging.info("Existing user found via security manager")
-                        else:
-                            logging.info("User does not exist, will create")
-                       
-                        user_name = decoded.get('user_name', '')
-                        email = decoded.get('email', username)
-                        roles = decoded.get('roles', [])
-                        name_parts = user_name.split(' ', 1)
-                        first_name = name_parts[0] if len(name_parts) > 0 else ''
-                        last_name = name_parts[1] if len(name_parts) > 1 else ''
-                       
-                        try:
-                            sm = app.appbuilder.sm
-                            role_objects = []
-                            for role_name in roles:
-                                role = sm.find_role(role_name)
-                                if not role:
-                                    role = sm.add_role(role_name)
-                                    logging.info("New role created")
-                                role_objects.append(role)
-                           
-                            public_role = sm.find_role('myportaluser')
-                            if public_role and public_role not in role_objects:
-                                role_objects.append(public_role)
- 
-                            # Find or create the user
-                            user = sm.find_user(username=username)
-                            if not user:
-                                user = sm.add_user(
-                                    username=username,
-                                    first_name=first_name,
-                                    last_name=last_name,
-                                    email=email,
-                                    role=role_objects[0] if role_objects else None # First role is primary
-                                )
- 
-                                logging.info("New user account created")
-                                # Add additional roles
-                                for role in role_objects[1:]:
-                                    sm.add_user_role(new_user, role)
-                            else:
-                                logging.info("User account already exists")
-                                # Update user roles. Important for role changes in the JWT.
-                                user.roles = role_objects
-                                logging.info(f"User roles updated with {len(role_objects)} roles")
- 
-                           # *** CRITICAL: Set the user in the Flask login context ***
-                            sm.set_flask_login_user(new_user)
-                            logging.info("User logged in successfully")
-                           
-                        except Exception as user_create_error:
-                            logging.error(f"Error creating user: {str(user_create_error)}")
-                            logging.debug(traceback.format_exc())
-                   
+
+                    # User authentication via JWT - handled by auth_user_jwt()
                     if not g.get('user') or not g.get('user').is_authenticated:
                         try:
                             user = app.appbuilder.sm.auth_user_jwt(token)
@@ -939,29 +888,58 @@ def flask_app_mutator(app):
             if not payload_b64 or not sig:
                 return (json.dumps({'error': 'missing payload or sig'}), 400, {'Content-Type': 'application/json'})
 
+            # Payload size validation - prevent DoS attacks
+            if len(payload_b64) > 16384:  # 16KB limit
+                logging.warning(f"Payload too large: {len(payload_b64)} bytes")
+                return (json.dumps({'error': 'payload too large'}), 413, {'Content-Type': 'application/json'})
+
             # Get shared secret from environment variable (must match WordPress wp-config.php)
             shared = os.getenv('RMC_AUTH_KEY')
             if not shared:
                 logging.critical("CRITICAL ERROR: RMC_AUTH_KEY not found in environment variables!")
-                return (json.dumps({'error': 'server configuration error'}), 500, {'Content-Type': 'application/json'})
+                return (json.dumps({'error': 'authentication failed'}), 500, {'Content-Type': 'application/json'})
 
             try:
                 payload_json = base64.urlsafe_b64decode(payload_b64 + '===').decode('utf-8')
             except Exception as e:
                 logging.error(f"Payload decode error: {str(e)}")
-                return (json.dumps({'error': 'bad payload encoding'}), 400, {'Content-Type': 'application/json'})
+                return (json.dumps({'error': 'authentication failed'}), 400, {'Content-Type': 'application/json'})
 
             computed = hmac.new(shared.encode('utf-8'), payload_json.encode('utf-8'), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(computed, sig):
-                return (json.dumps({'error': 'invalid signature'}), 401, {'Content-Type': 'application/json'})
+                logging.warning("Invalid HMAC signature detected")
+                return (json.dumps({'error': 'authentication failed'}), 401, {'Content-Type': 'application/json'})
 
             pointer = json.loads(payload_json)
 
+            # Timestamp validation - prevent replay attacks
+            timestamp = pointer.get('timestamp', 0)
+            current_time = int(time.time())
+            MAX_PAYLOAD_AGE = 300  # 5 minutes
+
+            if abs(current_time - timestamp) > MAX_PAYLOAD_AGE:
+                clock_skew = current_time - timestamp
+                logging.warning(f"Expired payload rejected (age: {clock_skew}s, max: {MAX_PAYLOAD_AGE}s)")
+                return (json.dumps({'error': 'authentication failed', 'details': 'expired payload'}), 401, {'Content-Type': 'application/json'})
+
+            # Input validation - prevent injection and database errors
             upn = pointer.get('upn') or pointer.get('email')
-            name = pointer.get('name') or upn
-            email = pointer.get('email') or upn
-            if not upn:
-                return (json.dumps({'error': 'missing upn'}), 400, {'Content-Type': 'application/json'})
+            if not upn or not isinstance(upn, str) or len(upn) > 255 or '@' not in upn:
+                logging.warning(f"Invalid upn format: {repr(upn)[:50]}")
+                return (json.dumps({'error': 'authentication failed', 'details': 'invalid user identifier'}), 400, {'Content-Type': 'application/json'})
+
+            name = (pointer.get('name') or upn)[:255]  # Truncate to DB limit
+            email = (pointer.get('email') or upn)[:255]
+
+            # Validate groups array
+            groups = pointer.get('groups')
+            if groups is not None:
+                if not isinstance(groups, list):
+                    logging.warning(f"Invalid groups type: {type(groups)}")
+                    return (json.dumps({'error': 'authentication failed', 'details': 'invalid groups format'}), 400, {'Content-Type': 'application/json'})
+                if len(groups) > 500:  # Reasonable limit
+                    logging.warning(f"Too many groups: {len(groups)}")
+                    return (json.dumps({'error': 'authentication failed', 'details': 'too many groups'}), 400, {'Content-Type': 'application/json'})
 
             exchange_url = os.getenv('WP_SSO_EXCHANGE_URL', '')
             if exchange_url:
@@ -1013,17 +991,24 @@ def flask_app_mutator(app):
             if default_role_name not in resolved_role_names:
                 resolved_role_names.append(default_role_name)
 
-            # Apply naming filters: startwith 'dashboard' or contains 'myportal'/'beta myportal'
+            # Apply naming filters: startwith 'dashboard' or contains 'myportal'/'beta myportal'/'administrator'
             try:
                 filtered: list[str] = []
                 for rn in resolved_role_names:
                     lower = (rn or '').lower()
-                    if lower.startswith('dashboard') or ('myportal' in lower) or ('beta myportal' in lower):
+                    if lower.startswith('dashboard') or ('myportal' in lower) or ('beta myportal' in lower) or ('administrator' in lower):
                         filtered.append(rn)
                 if filtered:
                     resolved_role_names = filtered
             except Exception as _:
                 pass
+
+            # Special handling for Dashboard - Administrator role
+            if "Dashboard - Administrator" in resolved_role_names:
+                # Replace Dashboard - Administrator with built-in Admin role
+                resolved_role_names.remove("Dashboard - Administrator")
+                resolved_role_names.append("Admin")
+                logging.info(f"Mapped Dashboard - Administrator to Superset Admin role for user {upn}")
 
             # Ensure user and roles
             try:
@@ -1055,10 +1040,10 @@ def flask_app_mutator(app):
                 return (json.dumps({'status': 'ok', 'user': upn, 'roles': [r.name for r in user.roles]}), 200, {'Content-Type': 'application/json'})
             except Exception as user_err:
                 logging.error(f"User setup error: {str(user_err)}")
-                return (json.dumps({'error': 'user setup failed'}), 500, {'Content-Type': 'application/json'})
+                return (json.dumps({'error': 'authentication failed'}), 500, {'Content-Type': 'application/json'})
         except Exception as e:
             logging.error(f"SSO init error: {str(e)}")
-            return (json.dumps({'error': 'server error'}), 500, {'Content-Type': 'application/json'})
+            return (json.dumps({'error': 'authentication failed'}), 500, {'Content-Type': 'application/json'})
 
 
     # Global request interceptor - handles ALL requests before route processing
@@ -1091,7 +1076,7 @@ def flask_app_mutator(app):
         return None
     
     @app.route('/auth/microsoft')
-    @limiter.limit("100 per minute")  # OAuth initiation - doubled limit for 1000 users
+    @limiter.limit("100 per minute")
     def microsoft_auth():
         """
         Custom Microsoft OAuth initiation - bypasses Flask-AppBuilder OAuth system
