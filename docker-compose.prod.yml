@@ -1,6 +1,8 @@
 #
 # PRODUCTION OVERRIDE
 # Defines settings unique to the production environment.
+# Main container (8088): Azure AD SSO for end users
+# Admin container (8090): Standard auth for administrators
 #
 services:
   superset:
@@ -10,6 +12,33 @@ services:
       - ./rmcdocker/prod.env
     restart: unless-stopped
 
+  superset-admin:
+    build:
+      context: .
+      dockerfile: ./rmcdocker/Dockerfile
+      target: lean
+    container_name: superset_admin_prod
+    command: ["/app/docker/docker-bootstrap.sh", "app-gunicorn"]
+    env_file: ./rmcdocker/prod.env
+    ports:
+      - "8090:8088"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - superset_home:/app/superset_home
+      - ./freetds:/etc/freetds
+      - ./rmcdocker/superset_config_admin.py:/app/pythonpath/superset_config.py
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
   db:
     restart: unless-stopped
 
@@ -17,7 +46,11 @@ services:
     restart: unless-stopped
 
   superset-worker:
+    env_file:
+      - ./rmcdocker/prod.env
     restart: unless-stopped
 
   superset-worker-beat:
+    env_file:
+      - ./rmcdocker/prod.env
     restart: unless-stopped
