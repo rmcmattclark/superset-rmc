@@ -646,7 +646,8 @@ FEATURE_FLAGS = {
     'ENABLE_TEMPLATE_PROCESSING': True,  # Enables Jinja templating
     'ALLOW_RUN_ASYNC': True,  # Enables async queries
     'DASHBOARD_RBAC': True, # Enables dashboard-level permissions
-    "HORIZONTAL_FILTER_BAR": True # Enables switching of dashboard filters from left side to top
+    "HORIZONTAL_FILTER_BAR": True, # Enables switching of dashboard filters from left side to top
+    "EMBEDDED_SUPERSET": True,  # Enables embedded/iframe mode for cross-origin theme support
 }
  
 def yesterday_date():
