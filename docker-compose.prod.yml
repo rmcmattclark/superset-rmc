@@ -63,10 +63,10 @@ services:
 volumes:
   db_data:
     external: true
-    name: superset-rmc-staging_db_data
+    name: superset-rmc-prod_db_data
   superset_home:
     external: true
-    name: superset-rmc-staging_superset_home
+    name: superset-rmc-prod_superset_home
   redis_data:
     external: true
-    name: superset-rmc-staging_redis_data
+    name: superset-rmc-prod_redis_data
